@@ -3,111 +3,220 @@
 <head>
   <meta charset="utf-8" />
   <title>DatoCMS Excel Importer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body {
-      font-family: sans-serif;
-      padding: 1rem;
-      box-sizing: border-box;
-    }
-    #log {
-      background: #f7f7f7;
-      padding: 0.5rem;
-      border: 1px solid #ddd;
-      height: 200px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-    }
-    button {
-      margin-top: 0.5rem;
-      padding: 0.5rem 1rem;
-      cursor: pointer;
-    }
+    :root { --border:#e5e7eb; --bg:#fafafa; --muted:#6b7280; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 16px; }
+    h3 { margin: 0 0 12px; }
+    .card { border:1px solid var(--border); background:#fff; border-radius:12px; padding:16px; }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    input[type="file"] { padding:8px; border:1px dashed var(--border); border-radius:8px; background:var(--bg); }
+    button { padding:8px 14px; border:1px solid var(--border); background:#111827; color:#fff; border-radius:8px; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    label { color:var(--muted); font-size:12px; }
+    select, input[type="text"] { padding:8px; border:1px solid var(--border); border-radius:8px; }
+    #log { background:#fff; border:1px solid var(--border); border-radius:8px; padding:10px; height:220px; overflow:auto; white-space:pre-wrap; }
+    .muted { color: var(--muted); font-size:12px; }
+    .grid { display:grid; gap:12px; grid-template-columns: 1fr; }
   </style>
 </head>
 <body>
-  <h3>Upload Excel File</h3>
-  <input type="file" id="fileInput" accept=".xlsx, .xls">
-  <button id="importBtn">Import to Dato</button>
-  <pre id="log"></pre>
+  <div class="grid">
+    <div class="card">
+      <h3>Excel → DatoCMS Import</h3>
+      <div class="row" style="margin-top:8px;">
+        <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" />
+        <button id="previewBtn">Preview</button>
+        <button id="importBtn" disabled>Import</button>
+      </div>
 
-  <!-- XLSX browser build -->
+      <div class="row" style="margin-top:12px;">
+        <label>Target model (auto when used as Sidebar on a model):</label>
+        <select id="itemTypeSelect"></select>
+        <span class="muted">If empty, attach this plugin as a Sidebar panel on a model to auto-detect.</span>
+      </div>
+
+      <div class="row" style="margin-top:12px;">
+        <label>Row limit (preview only):</label>
+        <input id="previewLimit" type="text" value="10" style="width:80px" />
+        <label>Batch size:</label>
+        <input id="batchSize" type="text" value="25" style="width:80px" />
+      </div>
+
+      <div style="margin-top:12px;">
+        <label class="muted">Field mapping (edit keys in code section marked “MAP FIELDS HERE”)</label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Log</h3>
+      <pre id="log"></pre>
+    </div>
+  </div>
+
+  <!-- SheetJS browser build (no bundler required) -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
-  <!-- DatoCMS Plugin SDK -->
+  <!-- DatoCMS Plugin SDK (ESM) -->
   <script type="module">
-    import { connect, startAutoResizer } from 'https://cdn.skypack.dev/datocms-plugin-sdk';
+    import { connect } from 'https://cdn.skypack.dev/datocms-plugin-sdk';
+    import autoResizer from 'https://cdn.skypack.dev/datocms-plugin-sdk/dist/autoResizer.js';
 
     let ctx;
+    let parsedRows = [];
 
+    // --- Helpers ---
+    const el = (id) => document.getElementById(id);
+    const log = (msg) => { el('log').textContent += msg + '\\n'; el('log').scrollTop = el('log').scrollHeight; };
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    // --- Dato plugin handshake + placement declaration ---
     connect({
-      // This tells Dato this plugin offers a Sidebar panel
       manualFieldExtensions() {
-        return []; // not a field editor
+        // Not a field editor; we’re a tool.
+        return [];
       },
       manualSidebarExtensions() {
-        return [
-          {
-            id: 'excel-importer',
-            label: 'Excel Importer',
-            icon: 'file-spreadsheet'
-          }
-        ];
+        // This registers the plugin as a Sidebar panel you can attach to models
+        return [{ id: 'excel-importer', label: 'Excel Importer', icon: 'file-spreadsheet' }];
       },
       async onBoot(pluginCtx) {
         ctx = pluginCtx;
-        startAutoResizer(); // auto-fit iframe height
-        log('Excel Importer ready in DatoCMS.');
+        autoResizer.startAutoResizer();
+        log('Connected to DatoCMS.');
+
+        // Populate itemTypeSelect:
+        // - If opened in a model/item sidebar, we can infer the current itemType.
+        // - Otherwise, list all collection models so user can choose one.
+        await populateItemTypes();
       }
     });
 
-    function log(message) {
-      const logEl = document.getElementById('log');
-      logEl.textContent += message + '\n';
-      logEl.scrollTop = logEl.scrollHeight;
+    async function populateItemTypes() {
+      const sel = el('itemTypeSelect');
+      sel.innerHTML = '';
+
+      try {
+        // If we’re inside a model’s sidebar, these are present:
+        const sidebarItemTypeId = ctx?.itemType?.id || ctx?.itemTypeId;
+        if (sidebarItemTypeId) {
+          const opt = document.createElement('option');
+          opt.value = sidebarItemTypeId;
+          opt.textContent = `Current model (ID: ${sidebarItemTypeId})`;
+          sel.appendChild(opt);
+          sel.value = sidebarItemTypeId;
+          log('Detected current model from sidebar context.');
+          return;
+        }
+
+        // Fallback: fetch all item types so user can choose one.
+        // The SDK exposes loaders for models; if unavailable, this gracefully skips.
+        const allItemTypes = await ctx.loaders.itemTypes.all();
+        const collectionTypes = allItemTypes.filter(t => t.modularBlock === false); // basic filter
+        if (!collectionTypes.length) {
+          log('No item types available to list. Attach the plugin to a model sidebar to auto-detect.');
+          return;
+        }
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = 'Select a model…';
+        sel.appendChild(placeholder);
+
+        for (const t of collectionTypes) {
+          const opt = document.createElement('option');
+          opt.value = t.id;
+          opt.textContent = `${t.apiKey} (ID: ${t.id})`;
+          sel.appendChild(opt);
+        }
+        log('Listed available models. Pick one if not attached to a specific model.');
+      } catch (e) {
+        log('Could not list item types automatically. If using as a Sidebar panel on a model, it will auto-detect.');
+      }
     }
 
-    document.getElementById('importBtn').addEventListener('click', async () => {
-      const file = document.getElementById('fileInput').files[0];
-      if (!file) {
-        log('No file selected.');
-        return;
+    // --- File handling + parsing ---
+    el('previewBtn').addEventListener('click', async () => {
+      const file = el('fileInput').files?.[0];
+      if (!file) return log('No file selected.');
+      log(`Reading: ${file.name}`);
+
+      try {
+        parsedRows = await parseExcel(file);
+        const limit = parseInt(el('previewLimit').value || '10', 10);
+        const preview = parsedRows.slice(0, limit);
+        log(`Parsed ${parsedRows.length} rows. Preview (first ${limit}):\\n` + JSON.stringify(preview, null, 2));
+        el('importBtn').disabled = parsedRows.length === 0;
+      } catch (e) {
+        log('Parse error: ' + (e?.message || e));
       }
+    });
 
-      log(`Reading file: ${file.name} ...`);
-      const rows = await parseExcel(file);
-      log(`Parsed ${rows.length} rows from Excel.`);
+    el('importBtn').addEventListener('click', async () => {
+      if (!parsedRows.length) return log('Nothing to import. Click Preview first.');
+      const itemTypeId = (el('itemTypeSelect').value || ctx?.itemType?.id || ctx?.itemTypeId || '').trim();
+      if (!itemTypeId) return log('Pick a target model first.');
 
-      // Get the current model's itemTypeId from context
-      const itemTypeId = ctx.itemType.id;
+      const batchSize = Math.max(1, parseInt(el('batchSize').value || '25', 10));
+      el('importBtn').disabled = true;
 
-      for (const row of rows) {
-        try {
-          const created = await ctx.loaders.items.create({
-            itemType: itemTypeId,
-            // Map Excel columns to your Dato fields here:
-            field1: row['Column A'],
-            field2: row['Column B']
-          });
-          log(`Created item ID: ${created.id}`);
-        } catch (error) {
-          log(`Error creating item: ${error.message}`);
+      log(`Starting import into model ID ${itemTypeId} in batches of ${batchSize}…`);
+      let ok = 0, fail = 0;
+
+      // Process in batches to play nice with rate limits
+      for (let i = 0; i < parsedRows.length; i += batchSize) {
+        const batch = parsedRows.slice(i, i + batchSize);
+        const results = await Promise.allSettled(batch.map(row => createDatoItem(itemTypeId, row)));
+
+        for (const r of results) {
+          if (r.status === 'fulfilled') ok++;
+          else { fail++; log('Error: ' + (r.reason?.message || r.reason || 'Unknown')); }
         }
+
+        log(`Imported ${ok} / ${parsedRows.length} so far…`);
+        // tiny pause between batches
+        await sleep(250);
       }
 
-      log('Import complete.');
+      log(`Import finished. Success: ${ok}, Failed: ${fail}`);
+      el('importBtn').disabled = false;
     });
 
     function parseExcel(file) {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = (e) => {
+          // Try Excel first; if CSV, SheetJS still handles it.
           const wb = XLSX.read(e.target.result, { type: 'binary' });
           const ws = wb.Sheets[wb.SheetNames[0]];
-          resolve(XLSX.utils.sheet_to_json(ws));
+          const rows = XLSX.utils.sheet_to_json(ws, { defval: null }); // keep empty cells as null
+          resolve(rows);
         };
         reader.onerror = reject;
         reader.readAsBinaryString(file);
       });
+    }
+
+    // --- Create item in Dato (MAP YOUR FIELDS HERE) ---
+    async function createDatoItem(itemTypeId, row) {
+      // TODO: Replace these with your model's actual field API keys
+      // Example mapping from Excel headers -> Dato fields:
+      const payload = {
+        itemType: itemTypeId,
+        // 'title' and 'slug' are examples — change to your field API keys:
+        title: row['Title'] ?? row['title'] ?? row['Name'],
+        slug: (row['Slug'] ?? row['slug'] ?? (row['Title'] || '')).toString().trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,''),
+        // add more fields as needed, e.g.:
+        // description: row['Description'],
+        // price: row['Price'],
+        // inStock: row['In Stock'] === 'Yes',
+      };
+
+      // Clean undefined keys so we don't send empty attributes
+      Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
+
+      // Use the plugin SDK loader to create an item
+      return ctx.loaders.items.create(payload);
     }
   </script>
 </body>
