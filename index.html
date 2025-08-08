@@ -5,69 +5,44 @@
   <title>DatoCMS Excel Importer</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { --border:#e5e7eb; --bg:#fafafa; --muted:#6b7280; }
-    * { box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 16px; }
-    h3 { margin: 0 0 12px; }
-    .card { border:1px solid var(--border); background:#fff; border-radius:12px; padding:16px; }
-    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    input[type="file"] { padding:8px; border:1px dashed var(--border); border-radius:8px; background:var(--bg); }
-    button { padding:8px 14px; border:1px solid var(--border); background:#111827; color:#fff; border-radius:8px; cursor:pointer; }
-    button:disabled { opacity:.6; cursor:not-allowed; }
-    label { color:var(--muted); font-size:12px; }
-    select, input[type="text"] { padding:8px; border:1px solid var(--border); border-radius:8px; }
-    #log { background:#fff; border:1px solid var(--border); border-radius:8px; padding:10px; height:220px; overflow:auto; white-space:pre-wrap; }
-    .muted { color: var(--muted); font-size:12px; }
-    .grid { display:grid; gap:12px; grid-template-columns: 1fr; }
+    body { font-family: sans-serif; padding: 1rem; }
+    h3 { margin: 0 0 0.5rem; }
+    .row { display: flex; gap: 8px; margin-bottom: 0.5rem; flex-wrap: wrap; }
+    input, select, button { padding: 6px; }
+    #log { border: 1px solid #ccc; background: #fafafa; padding: 8px; height: 200px; overflow: auto; white-space: pre-wrap; }
   </style>
 </head>
 <body>
-  <div class="grid">
-    <div class="card">
-      <h3>Excel → DatoCMS Import</h3>
-      <div class="row" style="margin-top:8px;">
-        <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" />
-        <button id="previewBtn">Preview</button>
-        <button id="importBtn" disabled>Import</button>
-      </div>
-
-      <div class="row" style="margin-top:12px;">
-        <label>Target model (auto when used as Sidebar on a model):</label>
-        <select id="itemTypeSelect"></select>
-      </div>
-
-      <div class="row" style="margin-top:12px;">
-        <label>Row limit (preview only):</label>
-        <input id="previewLimit" type="text" value="10" style="width:80px" />
-        <label>Batch size:</label>
-        <input id="batchSize" type="text" value="25" style="width:80px" />
-      </div>
-
-      <div style="margin-top:12px;">
-        <label class="muted">Edit field mapping in code section marked “MAP FIELDS HERE”</label>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3>Log</h3>
-      <pre id="log"></pre>
-    </div>
+  <h3>Excel → DatoCMS Import</h3>
+  <div class="row">
+    <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" />
+    <button id="previewBtn">Preview</button>
+    <button id="importBtn" disabled>Import</button>
   </div>
+  <div class="row">
+    <label>Target model:</label>
+    <select id="itemTypeSelect"></select>
+  </div>
+  <pre id="log"></pre>
 
   <!-- XLSX browser build -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
-  <!-- DatoCMS Plugin SDK UMD build -->
-  <script src="https://unpkg.com/datocms-plugin-sdk@latest/dist/datocms-plugin-sdk.umd.js"></script>
+  <!-- DatoCMS Plugin SDK browser build -->
+  <script src="https://unpkg.com/datocms-plugin-sdk/dist/datocms-plugin-sdk.js"></script>
 
   <script>
+    // Grab SDK functions from global
     const { connect, autoResizer } = window.DatoCmsPlugin;
+
     let ctx;
     let parsedRows = [];
 
-    const el = (id) => document.getElementById(id);
-    const log = (msg) => { el('log').textContent += msg + '\n'; el('log').scrollTop = el('log').scrollHeight; };
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    function log(msg) {
+      const logEl = document.getElementById('log');
+      logEl.textContent += msg + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
 
     connect({
       manualFieldExtensions() {
@@ -85,7 +60,7 @@
     });
 
     async function populateItemTypes() {
-      const sel = el('itemTypeSelect');
+      const sel = document.getElementById('itemTypeSelect');
       sel.innerHTML = '';
 
       const sidebarItemTypeId = ctx?.itemType?.id || ctx?.itemTypeId;
@@ -101,70 +76,51 @@
 
       try {
         const allItemTypes = await ctx.loaders.itemTypes.all();
-        const collectionTypes = allItemTypes.filter(t => t.modularBlock === false);
-        if (!collectionTypes.length) {
-          log('No item types available.');
-          return;
-        }
-        const placeholder = document.createElement('option');
-        placeholder.value = '';
-        placeholder.textContent = 'Select a model…';
-        sel.appendChild(placeholder);
-
-        for (const t of collectionTypes) {
+        allItemTypes.forEach(t => {
           const opt = document.createElement('option');
           opt.value = t.id;
           opt.textContent = `${t.apiKey} (ID: ${t.id})`;
           sel.appendChild(opt);
-        }
+        });
         log('Listed available models.');
       } catch {
-        log('Could not list item types automatically.');
+        log('Could not list models automatically.');
       }
     }
 
-    el('previewBtn').addEventListener('click', async () => {
-      const file = el('fileInput').files?.[0];
+    document.getElementById('previewBtn').addEventListener('click', async () => {
+      const file = document.getElementById('fileInput').files?.[0];
       if (!file) return log('No file selected.');
       log(`Reading: ${file.name}`);
 
       try {
         parsedRows = await parseExcel(file);
-        const limit = parseInt(el('previewLimit').value || '10', 10);
-        const preview = parsedRows.slice(0, limit);
-        log(`Parsed ${parsedRows.length} rows. Preview (first ${limit}):\n` + JSON.stringify(preview, null, 2));
-        el('importBtn').disabled = parsedRows.length === 0;
+        log(`Parsed ${parsedRows.length} rows. Preview:\n` + JSON.stringify(parsedRows.slice(0, 10), null, 2));
+        document.getElementById('importBtn').disabled = parsedRows.length === 0;
       } catch (e) {
         log('Parse error: ' + (e?.message || e));
       }
     });
 
-    el('importBtn').addEventListener('click', async () => {
+    document.getElementById('importBtn').addEventListener('click', async () => {
       if (!parsedRows.length) return log('Nothing to import. Click Preview first.');
-      const itemTypeId = (el('itemTypeSelect').value || ctx?.itemType?.id || ctx?.itemTypeId || '').trim();
+      const itemTypeId = document.getElementById('itemTypeSelect').value || ctx?.itemType?.id;
       if (!itemTypeId) return log('Pick a target model first.');
 
-      const batchSize = Math.max(1, parseInt(el('batchSize').value || '25', 10));
-      el('importBtn').disabled = true;
-
-      log(`Starting import into model ID ${itemTypeId} in batches of ${batchSize}…`);
+      log(`Starting import into model ID ${itemTypeId}…`);
       let ok = 0, fail = 0;
 
-      for (let i = 0; i < parsedRows.length; i += batchSize) {
-        const batch = parsedRows.slice(i, i + batchSize);
-        const results = await Promise.allSettled(batch.map(row => createDatoItem(itemTypeId, row)));
-
-        for (const r of results) {
-          if (r.status === 'fulfilled') ok++;
-          else { fail++; log('Error: ' + (r.reason?.message || r.reason || 'Unknown')); }
+      for (const row of parsedRows) {
+        try {
+          await createDatoItem(itemTypeId, row);
+          ok++;
+        } catch (err) {
+          fail++;
+          log('Error: ' + (err?.message || err));
         }
-
-        log(`Imported ${ok} / ${parsedRows.length} so far…`);
-        await sleep(250);
       }
 
       log(`Import finished. Success: ${ok}, Failed: ${fail}`);
-      el('importBtn').disabled = false;
     });
 
     function parseExcel(file) {
@@ -186,8 +142,12 @@
       const payload = {
         itemType: itemTypeId,
         title: row['Title'] ?? row['Name'],
-        slug: (row['Slug'] ?? row['Title'] ?? '').toString().trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'')
-        // Add other fields as needed
+        slug: (row['Slug'] ?? row['Title'] ?? '')
+          .toString()
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)/g, '')
       };
       Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
       return ctx.loaders.items.create(payload);
