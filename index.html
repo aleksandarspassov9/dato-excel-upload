@@ -58,7 +58,7 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
   <!-- DatoCMS Plugin SDK UMD build -->
-  <script src="https://unpkg.com/datocms-plugin-sdk/dist/datocms-plugin-sdk.js"></script>
+  <script src="https://unpkg.com/datocms-plugin-sdk@latest/dist/datocms-plugin-sdk.umd.js"></script>
 
   <script>
     const { connect, autoResizer } = window.DatoCmsPlugin;
@@ -185,10 +185,9 @@
     async function createDatoItem(itemTypeId, row) {
       const payload = {
         itemType: itemTypeId,
-        // Example mapping:
         title: row['Title'] ?? row['Name'],
         slug: (row['Slug'] ?? row['Title'] ?? '').toString().trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'')
-        // Add other field mappings here...
+        // Add other fields as needed
       };
       Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
       return ctx.loaders.items.create(payload);
