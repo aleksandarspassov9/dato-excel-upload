@@ -1,66 +1,95 @@
-<!-- index.html -->
 <!DOCTYPE html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Excel Importer Plugin</title>
-  </head>
-  <body>
-    <div id="app">Loading plugin…</div>
-    <script type="module">
-      import { connect } from 'https://cdn.skypack.dev/datocms-plugin-sdk';
-      import * as XLSX from 'https://cdn.skypack.dev/xlsx';
+<head>
+  <meta charset="utf-8" />
+  <title>DatoCMS Excel Importer</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 1rem;
+    }
+    #log {
+      background: #f7f7f7;
+      padding: 0.5rem;
+      border: 1px solid #ddd;
+      height: 200px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <h3>Upload Excel File</h3>
+  <input type="file" id="fileInput" accept=".xlsx, .xls">
+  <button id="importBtn">Import to Dato</button>
+  <pre id="log"></pre>
 
-      connect({
-        onBoot(ctx) {
-          document.getElementById('app').innerHTML = `
-            <h3>Upload Excel File</h3>
-            <input type="file" id="fileInput" accept=".xlsx, .xls">
-            <button id="importBtn">Import</button>
-            <pre id="log"></pre>
-          `;
+  <!-- Load XLSX browser build -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
-          const log = (msg) =>
-            (document.getElementById('log').textContent += msg + '\n');
+  <!-- Load DatoCMS plugin SDK from CDN -->
+  <script type="module">
+    import { connect } from 'https://cdn.skypack.dev/datocms-plugin-sdk';
 
-          document
-            .getElementById('importBtn')
-            .addEventListener('click', async () => {
-              const file = document.getElementById('fileInput').files[0];
-              if (!file) return log('No file selected');
+    let ctx;
 
-              const data = await parseExcel(file);
-              log(`Parsed ${data.length} rows from Excel.`);
+    // Connect immediately so DatoCMS doesn't time out
+    connect({
+      onBoot(pluginCtx) {
+        ctx = pluginCtx;
+        log('Plugin connected to DatoCMS.');
+      }
+    });
 
-              const itemTypeId = 'YOUR_ITEM_TYPE_ID';
-              for (const row of data) {
-                try {
-                  await ctx.loaders.items.create({
-                    itemType: itemTypeId,
-                    field1: row['Column A'],
-                    field2: row['Column B'],
-                  });
-                  log(`Imported: ${row['Column A']}`);
-                } catch (e) {
-                  log(`Error: ${e.message}`);
-                }
-              }
-            });
+    function log(message) {
+      const logEl = document.getElementById('log');
+      logEl.textContent += message + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
 
-          function parseExcel(file) {
-            return new Promise((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = (e) => {
-                const wb = XLSX.read(e.target.result, { type: 'binary' });
-                const ws = wb.Sheets[wb.SheetNames[0]];
-                resolve(XLSX.utils.sheet_to_json(ws));
-              };
-              reader.onerror = reject;
-              reader.readAsBinaryString(file);
-            });
-          }
-        },
+    document.getElementById('importBtn').addEventListener('click', async () => {
+      const file = document.getElementById('fileInput').files[0];
+      if (!file) {
+        log('No file selected.');
+        return;
+      }
+
+      log(`Reading file: ${file.name} ...`);
+      const rows = await parseExcel(file);
+      log(`Parsed ${rows.length} rows from Excel.`);
+
+      // CHANGE THIS to your model's Item Type ID from DatoCMS
+      const itemTypeId = 'YOUR_ITEM_TYPE_ID';
+
+      for (const row of rows) {
+        try {
+          const created = await ctx.loaders.items.create({
+            itemType: itemTypeId,
+            // Map Excel columns to your Dato fields here
+            field1: row['Column A'],
+            field2: row['Column B']
+          });
+          log(`Created item ID: ${created.id}`);
+        } catch (error) {
+          log(`Error creating item: ${error.message}`);
+        }
+      }
+
+      log('Import complete.');
+    });
+
+    function parseExcel(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const wb = XLSX.read(e.target.result, { type: 'binary' });
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          resolve(XLSX.utils.sheet_to_json(ws));
+        };
+        reader.onerror = reject;
+        reader.readAsBinaryString(file);
       });
-    </script>
-  </body>
+    }
+  </script>
+</body>
 </html>
