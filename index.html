@@ -30,6 +30,8 @@
   </div>
 
   <script>
+    console.log("DatoCmsPlugin global at load:", window.DatoCmsPlugin);
+
     // ---- Utility UI helpers ----
     const el = (id) => document.getElementById(id);
     const log = (msg) => { const L = el('log'); if (!L) return; L.textContent += msg + '\n'; L.scrollTop = L.scrollHeight; };
