@@ -7,6 +7,7 @@
     body {
       font-family: sans-serif;
       padding: 1rem;
+      box-sizing: border-box;
     }
     #log {
       background: #f7f7f7;
@@ -16,6 +17,11 @@
       overflow-y: auto;
       white-space: pre-wrap;
     }
+    button {
+      margin-top: 0.5rem;
+      padding: 0.5rem 1rem;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -24,20 +30,33 @@
   <button id="importBtn">Import to Dato</button>
   <pre id="log"></pre>
 
-  <!-- Load XLSX browser build -->
+  <!-- XLSX browser build -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
-  <!-- Load DatoCMS plugin SDK from CDN -->
+  <!-- DatoCMS Plugin SDK -->
   <script type="module">
-    import { connect } from 'https://cdn.skypack.dev/datocms-plugin-sdk';
+    import { connect, startAutoResizer } from 'https://cdn.skypack.dev/datocms-plugin-sdk';
 
     let ctx;
 
-    // Connect immediately so DatoCMS doesn't time out
     connect({
-      onBoot(pluginCtx) {
+      // This tells Dato this plugin offers a Sidebar panel
+      manualFieldExtensions() {
+        return []; // not a field editor
+      },
+      manualSidebarExtensions() {
+        return [
+          {
+            id: 'excel-importer',
+            label: 'Excel Importer',
+            icon: 'file-spreadsheet'
+          }
+        ];
+      },
+      async onBoot(pluginCtx) {
         ctx = pluginCtx;
-        log('Plugin connected to DatoCMS.');
+        startAutoResizer(); // auto-fit iframe height
+        log('Excel Importer ready in DatoCMS.');
       }
     });
 
@@ -58,14 +77,14 @@
       const rows = await parseExcel(file);
       log(`Parsed ${rows.length} rows from Excel.`);
 
-      // CHANGE THIS to your model's Item Type ID from DatoCMS
-      const itemTypeId = 'YOUR_ITEM_TYPE_ID';
+      // Get the current model's itemTypeId from context
+      const itemTypeId = ctx.itemType.id;
 
       for (const row of rows) {
         try {
           const created = await ctx.loaders.items.create({
             itemType: itemTypeId,
-            // Map Excel columns to your Dato fields here
+            // Map Excel columns to your Dato fields here:
             field1: row['Column A'],
             field2: row['Column B']
           });
