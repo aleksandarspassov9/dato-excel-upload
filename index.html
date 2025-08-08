@@ -10,7 +10,7 @@
     .row { display: flex; gap: 8px; margin-bottom: 0.5rem; flex-wrap: wrap; }
     input, select, button { padding: 6px; }
     button { cursor: pointer; }
-    #log { border: 1px solid #ccc; background: #fafafa; padding: 8px; height: 200px; overflow: auto; white-space: pre-wrap; }
+    #log { border: 1px solid #ccc; background: #fafafa; padding: 8px; height: 220px; overflow: auto; white-space: pre-wrap; }
     .muted { color: #666; font-size: 0.9em; }
   </style>
 </head>
@@ -29,25 +29,21 @@
     <pre id="log"></pre>
   </div>
 
-  <!-- XLSX browser build -->
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-
   <script>
-    // Check if running inside DatoCMS admin iframe
+    // ---- Utility UI helpers ----
+    const el = (id) => document.getElementById(id);
+    const log = (msg) => { const L = el('log'); if (!L) return; L.textContent += msg + '\n'; L.scrollTop = L.scrollHeight; };
+
+    // ---- Guard: only run inside Dato ----
     if (!window.DatoCmsPlugin) {
-      document.body.innerHTML = "<p style='font-family:sans-serif'>⚠️ This plugin must be run inside the DatoCMS admin UI.</p>";
+      document.body.innerHTML = "<p style='font-family:sans-serif;padding:1rem'>⚠️ This plugin must be opened inside the DatoCMS admin UI.</p>";
     } else {
       const { connect, autoResizer } = window.DatoCmsPlugin;
+
+      // Connect ASAP to satisfy Dato's 20s handshake requirement
       let ctx;
-      let parsedRows = [];
-
-      const el = (id) => document.getElementById(id);
-      const log = (msg) => { el('log').textContent += msg + '\n'; el('log').scrollTop = el('log').scrollHeight; };
-
       connect({
-        manualFieldExtensions() {
-          return [];
-        },
+        manualFieldExtensions() { return []; },
         manualSidebarExtensions() {
           return [{ id: 'excel-importer', label: 'Excel Importer', icon: 'file-spreadsheet' }];
         },
@@ -56,6 +52,7 @@
           autoResizer.startAutoResizer();
           log('Connected to DatoCMS.');
           await populateItemTypes();
+          wireEvents();
         }
       });
 
@@ -88,48 +85,71 @@
         }
       }
 
-      el('previewBtn').addEventListener('click', async () => {
-        const file = el('fileInput').files?.[0];
-        if (!file) return log('No file selected.');
-        log(`Reading: ${file.name}`);
-
-        try {
-          parsedRows = await parseExcel(file);
-          log(`Parsed ${parsedRows.length} rows. Preview:\n` + JSON.stringify(parsedRows.slice(0, 10), null, 2));
-          el('importBtn').disabled = parsedRows.length === 0;
-        } catch (e) {
-          log('Parse error: ' + (e?.message || e));
-        }
-      });
-
-      el('importBtn').addEventListener('click', async () => {
-        if (!parsedRows.length) return log('Nothing to import. Click Preview first.');
-        const itemTypeId = el('itemTypeSelect').value || ctx?.itemType?.id;
-        if (!itemTypeId) return log('Pick a target model first.');
-
-        log(`Starting import into model ID ${itemTypeId}…`);
-        let ok = 0, fail = 0;
-
-        for (const row of parsedRows) {
+      function wireEvents() {
+        el('previewBtn').addEventListener('click', async () => {
+          const file = el('fileInput').files?.[0];
+          if (!file) return log('No file selected.');
           try {
-            await createDatoItem(itemTypeId, row);
-            ok++;
-          } catch (err) {
-            fail++;
-            log('Error: ' + (err?.message || err));
+            await ensureXlsxLoaded();
+            const rows = await parseExcel(file);
+            window.__parsedRows = rows;
+            log(`Parsed ${rows.length} rows. Preview:\n` + JSON.stringify(rows.slice(0, 10), null, 2));
+            el('importBtn').disabled = rows.length === 0;
+          } catch (e) {
+            log('Parse error: ' + (e?.message || e));
           }
-        }
+        });
 
-        log(`Import finished. Success: ${ok}, Failed: ${fail}`);
-      });
+        el('importBtn').addEventListener('click', async () => {
+          const rows = window.__parsedRows || [];
+          if (!rows.length) return log('Nothing to import. Click Preview first.');
 
+          const itemTypeId = el('itemTypeSelect').value || ctx?.itemType?.id;
+          if (!itemTypeId) return log('Pick a target model first.');
+
+          const batchSize = 25;
+          let ok = 0, fail = 0;
+          log(`Starting import into model ID ${itemTypeId} in batches of ${batchSize}…`);
+
+          for (let i = 0; i < rows.length; i += batchSize) {
+            const batch = rows.slice(i, i + batchSize);
+            const results = await Promise.allSettled(batch.map(r => createDatoItem(itemTypeId, r)));
+            for (const r of results) {
+              if (r.status === 'fulfilled') ok++; else { fail++; log('Error: ' + (r.reason?.message || r.reason || 'Unknown')); }
+            }
+            log(`Imported ${ok} / ${rows.length} so far…`);
+            await new Promise(r => setTimeout(r, 250));
+          }
+
+          log(`Import finished. Success: ${ok}, Failed: ${fail}`);
+        });
+      }
+
+      // ---- Lazy-load XLSX only when needed (prevents handshake timeout) ----
+      let xlsxLoadingPromise = null;
+      function ensureXlsxLoaded() {
+        if (window.XLSX) return Promise.resolve();
+        if (xlsxLoadingPromise) return xlsxLoadingPromise;
+
+        xlsxLoadingPromise = new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+          s.async = true;
+          s.onload = () => resolve();
+          s.onerror = () => reject(new Error('Failed to load XLSX library'));
+          document.head.appendChild(s);
+        });
+        return xlsxLoadingPromise;
+      }
+
+      // ---- Excel parsing (uses XLSX once loaded) ----
       function parseExcel(file) {
         return new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = (e) => {
-            const wb = XLSX.read(e.target.result, { type: 'binary' });
+            const wb = window.XLSX.read(e.target.result, { type: 'binary' });
             const ws = wb.Sheets[wb.SheetNames[0]];
-            const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+            const rows = window.XLSX.utils.sheet_to_json(ws, { defval: null });
             resolve(rows);
           };
           reader.onerror = reject;
@@ -137,10 +157,11 @@
         });
       }
 
-      // MAP YOUR FIELDS HERE
+      // ---- MAP YOUR FIELDS HERE ----
       async function createDatoItem(itemTypeId, row) {
         const payload = {
           itemType: itemTypeId,
+          // Replace with your model's field API keys:
           title: row['Title'] ?? row['Name'],
           slug: (row['Slug'] ?? row['Title'] ?? '')
             .toString()
@@ -148,6 +169,10 @@
             .toLowerCase()
             .replace(/[^a-z0-9]+/g, '-')
             .replace(/(^-|-$)/g, '')
+          // Add more fields as needed, e.g.:
+          // description: row['Description'],
+          // price: row['Price'],
+          // available: row['Available'] === 'Yes',
         };
         Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
         return ctx.loaders.items.create(payload);
