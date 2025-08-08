@@ -33,6 +33,7 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
   <script>
+    // Check if running inside DatoCMS admin iframe
     if (!window.DatoCmsPlugin) {
       document.body.innerHTML = "<p style='font-family:sans-serif'>⚠️ This plugin must be run inside the DatoCMS admin UI.</p>";
     } else {
