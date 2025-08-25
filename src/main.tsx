@@ -3,13 +3,7 @@ import {
   connect,
   type RenderFieldExtensionCtx, // ✅ correct type
 } from 'datocms-plugin-sdk';
-import {
-  Canvas,
-  Button,
-  TextField,
-  Dropdown,
-  Spinner,
-} from 'datocms-react-ui';
+import { Canvas, Button, TextField, SelectField, Spinner } from 'datocms-react-ui';
 
 import { buildClient } from '@datocms/cma-client-browser';
 import * as XLSX from 'xlsx';
@@ -18,7 +12,7 @@ import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-alpine.css';
 import 'datocms-react-ui/styles.css';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 type TableRow = Record<string, unknown>;
 
@@ -195,16 +189,17 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       {notice && <Alert>{notice}</Alert>}
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-        <Button onClick={importFromSource} disabled={busy}>Import from source file</Button>
-        <Button onClick={saveJson} disabled={busy}>Save JSON to field</Button>
-        <Button onClick={addRow} disabled={busy} variant="quiet">+ Row</Button>
-        <Button onClick={addColumn} disabled={busy} variant="quiet">+ Column</Button>
+        <Button onClick={importFromSource} disabled={busy} buttonType="primary">Import from source file</Button>
+        <Button onClick={saveJson} disabled={busy} buttonType="primary">Save JSON to field</Button>
+        <Button onClick={addRow} disabled={busy} buttonType="muted" buttonSize="s">+ Row</Button>
+        <Button onClick={addColumn} disabled={busy} buttonType="muted" buttonSize="s">+ Column</Button>
         {sheetNames.length > 1 && (
-          <Dropdown
+        <SelectField
             id="sheet"
-            value={sheet || ''}
-            options={sheetNames.map((n) => ({ label: n, value: n }))}
-            onChange={(v) => setSheet(v as string)}
+            name="sheet"
+            label="Sheet"
+            value={sheet ?? ''}
+            onChange={(v) => setSheet((v ?? '') as string)}
           />
         )}
       </div>
