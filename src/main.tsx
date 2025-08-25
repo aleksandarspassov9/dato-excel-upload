@@ -208,7 +208,7 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
         )}
       </div>
 
-      <div className="ag-theme-alpine" style={{ height: 400, width: '100%' }}>
+      <div style={{ height: 400, width: '100%' }}>
         <AgGridReact
           theme={themeQuartz}
           rowData={rows as any[]}
