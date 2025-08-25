@@ -13,8 +13,8 @@ import { buildClient } from '@datocms/cma-client-browser';
 import * as XLSX from 'xlsx';
 import { AgGridReact } from 'ag-grid-react';
 
-import 'ag-grid-community/styles/ag-grid.css';
-import 'ag-grid-community/styles/ag-theme-alpine.css';
+import { themeQuartz } from 'ag-grid-community';
+
 import 'datocms-react-ui/styles.css';
 import React, { useEffect, useMemo, useState } from 'react';
 
@@ -210,6 +210,7 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       <div className="ag-theme-alpine" style={{ height: 400, width: '100%' }}>
         <AgGridReact
+          theme={themeQuartz}
           rowData={rows as any[]}
           columnDefs={columnDefs as any}
           onCellValueChanged={(e: any) => {
