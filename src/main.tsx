@@ -1,3 +1,7 @@
+
+import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community';
+ModuleRegistry.registerModules([AllCommunityModule]);
+
 import ReactDOM from 'react-dom/client';
 import {
   connect,
