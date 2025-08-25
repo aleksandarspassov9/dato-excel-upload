@@ -1,15 +1,26 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import { connect, RenderManualFieldExtensionCtx } from 'datocms-plugin-sdk';
-import { Canvas, Button, TextField, Dropdown, Spinner, Notice } from 'datocms-react-ui';
+import {
+  connect,
+  type RenderFieldExtensionCtx, // ✅ correct type
+} from 'datocms-plugin-sdk';
+import {
+  Canvas,
+  Button,
+  TextField,
+  Dropdown,
+  Spinner,
+} from 'datocms-react-ui';
+
 import { buildClient } from '@datocms/cma-client-browser';
 import * as XLSX from 'xlsx';
 import { AgGridReact } from 'ag-grid-react';
+
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-alpine.css';
 import 'datocms-react-ui/styles.css';
+import { useMemo, useState } from 'react';
 
-type TableRow = Record<string, any>;
+type TableRow = Record<string, unknown>;
 
 type FieldParams = {
   sourceFileApiKey: string;   // e.g., "sourceFile"
@@ -17,9 +28,11 @@ type FieldParams = {
   rowCountApiKey?: string;    // e.g., "rowCount"
 };
 
-function getFieldByApiKey(apiKey: string, ctx: RenderManualFieldExtensionCtx) {
+function getFieldByApiKey(apiKey: string, ctx: RenderFieldExtensionCtx) {
   const all = Object.values(ctx.fields);
-  return all.find((f: any) => f.attributes.api_key === apiKey);
+  return all.find((f: any) => f.attributes.api_key === apiKey) as
+    | { id: string; attributes: { api_key: string } }
+    | undefined;
 }
 
 async function fetchUploadUrlFromValue(
@@ -29,46 +42,66 @@ async function fetchUploadUrlFromValue(
   const uploadId = fileFieldValue?.upload_id;
   if (!uploadId) return null;
   const client = buildClient({ apiToken: cmaToken });
-  const upload = await client.uploads.find(uploadId);
-  return (upload as any)?.url || null; // CMA Upload has `url`
+  const upload = await client.uploads.find(uploadId as string);
+  return (upload as any)?.url || null;
 }
 
 function inferColumns(rows: TableRow[]): string[] {
   const first = rows?.[0] || {};
-  return Object.keys(first);
+  return Object.keys(first as object);
 }
 
-function toSheetJSRows(binary: ArrayBuffer, sheetName?: string): { rows: TableRow[], sheetNames: string[] } {
+function toSheetJSRows(
+  binary: ArrayBuffer,
+  desiredSheetName?: string,
+): { rows: TableRow[]; sheetNames: string[] } {
   const wb = XLSX.read(binary, { type: 'array' });
   const names = wb.SheetNames;
-  const target = sheetName && names.includes(sheetName) ? sheetName : names[0];
+  const target = desiredSheetName && names.includes(desiredSheetName)
+    ? desiredSheetName
+    : names[0];
   const ws = wb.Sheets[target];
-  const rows = XLSX.utils.sheet_to_json(ws, { defval: null }); // array of objects
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: null }) as TableRow[];
   return { rows, sheetNames: names };
 }
 
-function Editor({ ctx }: { ctx: RenderManualFieldExtensionCtx }) {
+function Alert({ children }: { children: React.ReactNode }) {
+  return (
+    <div role="alert" style={{
+      padding: '8px 12px',
+      border: '1px solid var(--border-color)',
+      borderRadius: 6,
+      marginBottom: 8,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const params = (ctx.parameters as any) as FieldParams;
+
   const [busy, setBusy] = useState(false);
   const [sheet, setSheet] = useState<string | null>(null);
   const [sheetNames, setSheetNames] = useState<string[]>([]);
-  const [rows, setRows] = useState<TableRow[]>(() => (ctx.formValues[ctx.fieldPath] as any) || []);
+  const [rows, setRows] = useState<TableRow[]>(() => {
+    const initial = (ctx.formValues as any)[ctx.fieldPath];
+    return Array.isArray(initial) ? (initial as TableRow[]) : [];
+  });
   const [notice, setNotice] = useState<string | null>(null);
 
   // Build Ag-Grid columns dynamically
   const columnDefs = useMemo(() => {
     const cols = new Set<string>();
-    rows.forEach((r) => Object.keys(r).forEach((k) => cols.add(k)));
+    rows.forEach((r) => Object.keys(r as object).forEach((k) => cols.add(k)));
     if (cols.size === 0) cols.add('column1');
     return Array.from(cols).map((c) => ({ field: c, editable: true }));
   }, [rows]);
 
-  // Helper: get the raw value of the file field from formValues (by field ID)
   function getFileFieldValue() {
     const field = getFieldByApiKey(params.sourceFileApiKey, ctx);
     if (!field) return null;
-    // formValues keys are field IDs; for localized fields you'll get per-locale object
-    return (ctx.formValues as any)[field.id] || null;
+    return (ctx.formValues as any)[field.id] ?? null;
   }
 
   async function importFromSource() {
@@ -82,11 +115,14 @@ function Editor({ ctx }: { ctx: RenderManualFieldExtensionCtx }) {
         return;
       }
 
-      // Handle localized file fields (take current locale if present)
       const currentLocale = ctx.locale || undefined;
-      const val = typeof fileVal === 'object' && fileVal !== null && currentLocale && fileVal[currentLocale]
-        ? fileVal[currentLocale]
-        : fileVal;
+      const localized =
+        typeof fileVal === 'object' &&
+        fileVal !== null &&
+        currentLocale &&
+        fileVal[currentLocale]
+          ? fileVal[currentLocale]
+          : fileVal;
 
       const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
       if (!token) {
@@ -94,7 +130,7 @@ function Editor({ ctx }: { ctx: RenderManualFieldExtensionCtx }) {
         return;
       }
 
-      const url = await fetchUploadUrlFromValue(val, token);
+      const url = await fetchUploadUrlFromValue(localized, token);
       if (!url) {
         setNotice('Could not resolve upload URL.');
         return;
@@ -107,7 +143,6 @@ function Editor({ ctx }: { ctx: RenderManualFieldExtensionCtx }) {
       setRows(parsed);
       setSheet(names[0] || null);
 
-      // Optionally update meta fields
       if (params.columnsMetaApiKey) {
         await ctx.setFieldValue(params.columnsMetaApiKey, { columns: inferColumns(parsed) });
       }
@@ -125,9 +160,7 @@ function Editor({ ctx }: { ctx: RenderManualFieldExtensionCtx }) {
     try {
       setBusy(true);
       setNotice(null);
-      // Save table rows into the JSON field this editor is attached to
       await ctx.setFieldValue(ctx.fieldPath, rows);
-      // Optional meta refresh
       if (params.columnsMetaApiKey) {
         await ctx.setFieldValue(params.columnsMetaApiKey, { columns: inferColumns(rows) });
       }
@@ -148,19 +181,18 @@ function Editor({ ctx }: { ctx: RenderManualFieldExtensionCtx }) {
 
   function addColumn() {
     const newKey = `col_${Date.now().toString().slice(-4)}`;
-    setRows((old) => old.map((r) => ({ ...r, [newKey]: r[newKey] ?? null })));
+    setRows((old) => old.map((r) => ({ ...r, [newKey]: (r as any)[newKey] ?? null })));
   }
 
-  // Keep grid state in sync with Dato form when editor opens with existing JSON
   useEffect(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
-    if (Array.isArray(initial)) setRows(initial);
-  }, [ctx.fieldPath]);
+    if (Array.isArray(initial)) setRows(initial as TableRow[]);
+  }, [ctx.fieldPath, ctx.formValues]);
 
   return (
     <Canvas ctx={ctx}>
-      {busy && <Spinner/>}
-      {notice && <Notice>{notice}</Notice>}
+      {busy && <Spinner />}
+      {notice && <Alert>{notice}</Alert>}
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
         <Button onClick={importFromSource} disabled={busy}>Import from source file</Button>
@@ -179,14 +211,16 @@ function Editor({ ctx }: { ctx: RenderManualFieldExtensionCtx }) {
 
       <div className="ag-theme-alpine" style={{ height: 400, width: '100%' }}>
         <AgGridReact
-          rowData={rows}
-          columnDefs={columnDefs}
-          onCellValueChanged={(e) => {
-            const { rowIndex, colDef, newValue } = e as any;
-            const key = colDef.field;
+          rowData={rows as any[]}
+          columnDefs={columnDefs as any}
+          onCellValueChanged={(e: any) => {
+            const { rowIndex, colDef, newValue } = e;
+            const key = colDef.field as string;
             setRows((prev) => {
               const copy = [...prev];
-              copy[rowIndex] = { ...copy[rowIndex], [key]: newValue };
+              const row = { ...(copy[rowIndex] || {}) } as Record<string, unknown>;
+              row[key] = newValue;
+              copy[rowIndex] = row;
               return copy;
             });
           }}
@@ -196,35 +230,34 @@ function Editor({ ctx }: { ctx: RenderManualFieldExtensionCtx }) {
   );
 }
 
+function Config({ ctx }: { ctx: any }) {
+  const [token, setToken] = useState<string>((ctx.plugin.attributes.parameters as any)?.cmaToken || '');
+  return (
+    <Canvas ctx={ctx}>
+      <TextField
+        id="cmaToken"
+        name="cmaToken"
+        label="CMA API Token (Uploads: Read)"
+        value={token}
+        onChange={setToken}
+      />
+      <Button
+        onClick={async () => {
+          await ctx.updatePluginParameters({ cmaToken: token });
+          ctx.notice('Saved plugin configuration.');
+        }}
+      >
+        Save configuration
+      </Button>
+    </Canvas>
+  );
+}
+
 connect({
-  // Config screen: set the CMA token once per plugin
   renderConfigScreen(ctx) {
-    function Config() {
-      const [token, setToken] = useState<string>((ctx.plugin.attributes.parameters as any)?.cmaToken || '');
-      return (
-        <Canvas ctx={ctx}>
-          <TextField
-            id="cmaToken"
-            name="cmaToken"
-            label="CMA API Token (Uploads: Read)"
-            value={token}
-            onChange={setToken}
-          />
-          <Button
-            onClick={async () => {
-              await ctx.updatePluginParameters({ cmaToken: token });
-              ctx.notice('Saved plugin configuration.');
-            }}
-          >
-            Save configuration
-          </Button>
-        </Canvas>
-      );
-    }
-    ReactDOM.createRoot(document.getElementById('root')!).render(<Config />);
+    ReactDOM.createRoot(document.getElementById('root')!).render(<Config ctx={ctx} />);
   },
 
-  // Make this plugin available as a manual field editor for JSON fields
   manualFieldExtensions() {
     return [
       {
@@ -247,3 +280,13 @@ connect({
     }
   },
 });
+
+// Optional dev harness if opened directly (not in Dato iframe)
+if (window.self === window.top) {
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <div style={{ padding: 16 }}>
+      <h3>Plugin dev harness</h3>
+      <p>This page is meant to be embedded in Dato.</p>
+    </div>
+  );
+}
