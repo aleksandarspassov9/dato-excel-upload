@@ -167,26 +167,73 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     return Array.from(cols).map((c) => ({ field: c, editable: true }));
   }, [rows]);
 
-  function getFileFieldValue() {
-    const fileFieldId = resolveFieldId(ctx, preferredApiKey);
-    if (!fileFieldId) return null;
+ function getFileFieldValue() {
+  const preferredApiKey =
+    getUrlOverrideApiKey() || getEditorParams(ctx).sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY;
 
-    // raw can be localized or not
-    let raw = (ctx.formValues as any)[fileFieldId];
-    raw = pickLocalizedValue(raw, ctx.locale);
-    if (!raw) return null;
+  // 1) Try top-level field by apiKey/id
+  const fileFieldId = resolveFieldId(ctx, preferredApiKey);
+  let raw = fileFieldId ? (ctx.formValues as any)[fileFieldId] : undefined;
 
-    // multiple files → take first
-    if (Array.isArray(raw)) raw = raw[0];
+  // 2) Handle localization wrapper
+  raw = pickLocalizedValue(raw, ctx.locale);
 
-    // normalize to an object with upload_id (preferred), or allow direct URL (edge)
-    if (raw?.upload_id) return raw;
-    if (raw?.upload?.id) return { upload_id: raw.upload.id };
-    if (typeof raw === 'string' && raw.startsWith('http')) {
-      return { __direct_url: raw };
+  // 3) If the top-level is empty, try a recursive scan (covers blocks/modular content)
+  if (!raw) {
+    const found = findFirstUploadInObject(ctx.formValues, ctx.locale);
+    if (found) raw = found;
+  }
+
+  if (!raw) return null;
+
+  // 4) Multiple files → take the first
+  if (Array.isArray(raw)) raw = raw[0];
+
+  // 5) Normalize shapes
+  if (raw?.upload_id) return raw;
+  if (raw?.upload?.id) return { upload_id: raw.upload.id };
+
+  // Last resort: direct URL string (rare)
+  if (typeof raw === 'string' && raw.startsWith('http')) {
+    return { __direct_url: raw };
+  }
+
+  return null;
+}
+
+function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
+  if (!obj || typeof obj !== 'object') return null;
+
+  // If localized at this node, pick current-locale branch
+  const localized = pickLocalizedValue(obj, locale);
+
+  // Check direct shapes
+  const cur = localized ?? obj;
+
+  // a) Array of uploads or blocks
+  if (Array.isArray(cur)) {
+    for (const item of cur) {
+      const hit = findFirstUploadInObject(item, locale);
+      if (hit) return hit;
     }
     return null;
   }
+
+  // b) Direct upload-like shapes
+  if (cur?.upload_id || cur?.upload?.id || (typeof cur === 'string' && cur.startsWith('http'))) {
+    return cur;
+  }
+
+  // c) Walk object keys
+  for (const key of Object.keys(cur)) {
+    const hit = findFirstUploadInObject(cur[key], locale);
+    if (hit) return hit;
+  }
+
+  return null;
+}
+
+
 
   async function importFromSource() {
     try {
