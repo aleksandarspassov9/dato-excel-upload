@@ -1,4 +1,3 @@
-import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { connect, type RenderFieldExtensionCtx } from 'datocms-plugin-sdk';
 import { Canvas } from 'datocms-react-ui';
@@ -20,7 +19,7 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
 connect({
   // No config screen for this test
-  renderConfigScreen(ctx) {
+  renderConfigScreen() {
     ReactDOM.createRoot(document.getElementById('root')!).render(
       <div style={{ padding: 12 }}>Config screen (not used in test)</div>
     );
