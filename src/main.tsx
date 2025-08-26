@@ -15,19 +15,19 @@ import { buildClient } from '@datocms/cma-client-browser';
 import * as XLSX from 'xlsx';
 import { AgGridReact } from 'ag-grid-react';
 
-// AG Grid v34 modules (Theming API + editors)
+// AG Grid v31+ modular registration (Community)
 import {
   ModuleRegistry,
   ClientSideRowModelModule,
-  TextEditorModule,
-  // ValidationModule, // (optional) enable during dev for verbose errors
+  TextEditorModule,      // 👈 add this
+  ValidationModule,      // (optional) just for clearer console errors
   themeQuartz,
 } from 'ag-grid-community';
 
 ModuleRegistry.registerModules([
   ClientSideRowModelModule,
-  TextEditorModule,
-  // ValidationModule,
+  TextEditorModule,      // 👈 required for editable cells
+  ValidationModule,   // (optional) helpful during dev
 ]);
 
 // Dato UI styles
@@ -152,33 +152,6 @@ function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
   return null;
 }
 
-// sanitize to valid JSON (replace undefined/NaN with null)
-function sanitizeJSON(x: any): any {
-  if (x === undefined || (typeof x === 'number' && Number.isNaN(x))) return null;
-  if (Array.isArray(x)) return x.map(sanitizeJSON);
-  if (x && typeof x === 'object') {
-    const out: Record<string, any> = {};
-    for (const [k, v] of Object.entries(x)) out[k] = sanitizeJSON(v);
-    return out;
-  }
-  return x;
-}
-
-// resolve id/apiKey to the correct path (handles locale)
-function getFieldPath(ctx: RenderFieldExtensionCtx, apiKeyOrId: string): string | null {
-  const fields = Object.values(ctx.fields) as any[];
-  const byId = (ctx.fields as any)[apiKeyOrId];
-  const id =
-    byId?.id ?? (fields.find(f => (f.apiKey ?? f.attributes?.api_key) === apiKeyOrId)?.id);
-  if (!id) return null;
-  return ctx.locale ? `${id}.${ctx.locale}` : id;
-}
-
-async function setFieldByApiOrId(ctx: RenderFieldExtensionCtx, apiKeyOrId: string, value: unknown) {
-  const path = getFieldPath(ctx, apiKeyOrId);
-  if (path) await ctx.setFieldValue(path, value);
-}
-
 function Alert({ children }: { children: React.ReactNode }) {
   return (
     <div
@@ -209,10 +182,6 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const [sheetNames, setSheetNames] = useState<string[]>([]);
   const [rows, setRows] = useState<TableRow[]>(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
-    // If previous value was an object wrapper, try to load rows from it; else assume array
-    if (initial && typeof initial === 'object' && !Array.isArray(initial) && (initial as any).rows) {
-      return ((initial as any).rows as TableRow[]) || [];
-    }
     return Array.isArray(initial) ? (initial as TableRow[]) : [];
   });
 
@@ -277,27 +246,23 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       const res = await fetch(url);
       const buf = await res.arrayBuffer();
+
       const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
+const cleanParsed = sanitizeJSON(parsed);
 
-      const cleanRows = sanitizeJSON(parsed);
-      setSheetNames(names);
-      setRows(cleanRows);
-      setSheet(names[0] || null);
+setSheetNames(names);
+setRows(cleanParsed);
+setSheet(names[0] || null);
 
-      // Build and save object payload (passes JSON "object only" validation)
-      const payloadForDataJson = {
-        rows: cleanRows,
-        meta: { columns: inferColumns(cleanRows) },
-      };
-      await ctx.setFieldValue(ctx.fieldPath, payloadForDataJson);
 
-      // Optional meta fields
       if (params.columnsMetaApiKey) {
-        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, payloadForDataJson.meta);
-      }
-      if (params.rowCountApiKey) {
-        await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(cleanRows.length));
-      }
+  await setFieldByApiOrId(ctx, params.columnsMetaApiKey, {
+    columns: inferColumns(cleanParsed),
+  });
+}
+if (params.rowCountApiKey) {
+  await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(cleanParsed.length));
+}
     } catch (e: any) {
       setNotice(`Import failed: ${e?.message || e}`);
     } finally {
@@ -305,33 +270,63 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     }
   }
 
-  async function saveJson() {
-    try {
-      setBusy(true);
-      setNotice(null);
+  function getFieldPath(ctx: RenderFieldExtensionCtx, apiKeyOrId: string): string | null {
+  const id = resolveFieldId(ctx, apiKeyOrId);
+  if (!id) return null;
+  return ctx.locale ? `${id}.${ctx.locale}` : id;
+}
 
-      const cleanRows = sanitizeJSON(rows);
-      const payloadForDataJson = {
-        rows: cleanRows,
-        meta: { columns: inferColumns(cleanRows) },
-      };
+// Set a field value by API key or ID safely
+async function setFieldByApiOrId(
+  ctx: RenderFieldExtensionCtx,
+  apiKeyOrId: string,
+  value: unknown
+) {
+  const path = getFieldPath(ctx, apiKeyOrId);
+  if (!path) return;
+  await ctx.setFieldValue(path, value);
+}
 
-      await ctx.setFieldValue(ctx.fieldPath, payloadForDataJson);
-
-      if (params.columnsMetaApiKey) {
-        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, payloadForDataJson.meta);
-      }
-      if (params.rowCountApiKey) {
-        await setFieldByApiOrId(ctx, params.rowCountApiKey, Number((cleanRows as any[]).length));
-      }
-
-      ctx.notice('Saved table JSON to field.');
-    } catch (e: any) {
-      setNotice(`Save failed: ${e?.message || e}`);
-    } finally {
-      setBusy(false);
-    }
+// Ensure we never send undefined/NaN (Dato rejects non-JSON values)
+function sanitizeJSON(x: any): any {
+  if (x === undefined || (typeof x === 'number' && Number.isNaN(x))) return null;
+  if (Array.isArray(x)) return x.map(sanitizeJSON);
+  if (x && typeof x === 'object') {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(x)) out[k] = sanitizeJSON(v);
+    return out;
   }
+  return x;
+}
+
+  async function saveJson() {
+  try {
+    setBusy(true);
+    setNotice(null);
+
+    const cleanRows = sanitizeJSON(rows);
+
+    // Save into THIS JSON field (ctx.fieldPath already includes locale/id)
+    await ctx.setFieldValue(ctx.fieldPath, cleanRows);
+
+    // Optional meta fields — write using field IDs/paths, not API keys directly
+    if (params.columnsMetaApiKey) {
+      await setFieldByApiOrId(ctx, params.columnsMetaApiKey, {
+        columns: inferColumns(cleanRows),
+      });
+    }
+    if (params.rowCountApiKey) {
+      await setFieldByApiOrId(ctx, params.rowCountApiKey, Number((cleanRows as any[]).length));
+    }
+
+    ctx.notice('Saved table JSON to field.');
+  } catch (e: any) {
+    setNotice(`Save failed: ${e?.message || e}`);
+  } finally {
+    setBusy(false);
+  }
+}
+
 
   function addRow() {
     setRows((r) => [...r, {}]);
@@ -343,11 +338,7 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
   useEffect(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
-    if (initial && typeof initial === 'object' && !Array.isArray(initial) && (initial as any).rows) {
-      setRows(((initial as any).rows as TableRow[]) || []);
-    } else if (Array.isArray(initial)) {
-      setRows(initial as TableRow[]);
-    }
+    if (Array.isArray(initial)) setRows(initial as TableRow[]);
   }, [ctx.fieldPath, ctx.formValues]);
 
   return (
@@ -409,17 +400,9 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
               const res = await fetch(url);
               const buf = await res.arrayBuffer();
               const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
-
-              const cleanRows = sanitizeJSON(parsed);
               setSheetNames(names);
-              setRows(cleanRows);
+              setRows(parsed);
               setSheet(names[0] || null);
-
-              const payloadForDataJson = {
-                rows: cleanRows,
-                meta: { columns: inferColumns(cleanRows) },
-              };
-              await ctx.setFieldValue(ctx.fieldPath, payloadForDataJson);
             } catch (e: any) {
               setNotice(`Debug pick failed: ${e?.message || e}`);
             } finally {
@@ -473,7 +456,7 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
         </div>
       )}
 
-      {/* Theming API (no CSS theme class) */}
+      {/* Theming API: pass theme object, no CSS theme class */}
       <div style={{ height: 420, width: '100%' }}>
         <AgGridReact
           theme={themeQuartz}
