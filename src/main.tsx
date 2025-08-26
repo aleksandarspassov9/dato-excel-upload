@@ -16,8 +16,19 @@ import * as XLSX from 'xlsx';
 import { AgGridReact } from 'ag-grid-react';
 
 // AG Grid v31+ modular registration (Community)
-import { ModuleRegistry, ClientSideRowModelModule, themeQuartz } from 'ag-grid-community';
-ModuleRegistry.registerModules([ClientSideRowModelModule]);
+import {
+  ModuleRegistry,
+  ClientSideRowModelModule,
+  TextEditorModule,      // 👈 add this
+  ValidationModule,      // (optional) just for clearer console errors
+  themeQuartz,
+} from 'ag-grid-community';
+
+ModuleRegistry.registerModules([
+  ClientSideRowModelModule,
+  TextEditorModule,      // 👈 required for editable cells
+  ValidationModule,   // (optional) helpful during dev
+]);
 
 // Dato UI styles
 import 'datocms-react-ui/styles.css';
