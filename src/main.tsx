@@ -16,12 +16,8 @@ import * as XLSX from 'xlsx';
 import { AgGridReact } from 'ag-grid-react';
 
 // AG Grid v31+ modular registration (Community)
-import { ModuleRegistry, ClientSideRowModelModule } from 'ag-grid-community';
+import { ModuleRegistry, ClientSideRowModelModule, themeQuartz } from 'ag-grid-community';
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
-
-// Legacy CSS themes (do NOT pass a theme object prop to AgGridReact)
-import 'ag-grid-community/styles/ag-grid.css';
-import 'ag-grid-community/styles/ag-theme-alpine.css';
 
 // Dato UI styles
 import 'datocms-react-ui/styles.css';
@@ -47,7 +43,6 @@ function getUrlOverrideApiKey(): string | undefined {
   }
 }
 
-// Prefer ctx.parameters, else field appearance, but we can work without either
 function getEditorParams(ctx: RenderFieldExtensionCtx): FieldParams {
   const direct = (ctx.parameters as any) || {};
   if (direct && Object.keys(direct).length) return direct;
@@ -66,16 +61,13 @@ function resolveFieldId(
   const fields = Object.values(ctx.fields) as any[];
 
   if (preferred) {
-    // treat as field ID
     const byId = (ctx.fields as any)[preferred];
     if (byId?.id) return byId.id;
 
-    // or as API key
     const match = fields.find((f) => (f.apiKey ?? f.attributes?.api_key) === preferred);
     if (match) return match.id;
   }
 
-  // fallback: first file field on the model
   const firstFile = fields.find(
     (f) => (f.fieldType ?? f.attributes?.field_type) === 'file',
   );
@@ -83,8 +75,6 @@ function resolveFieldId(
 }
 
 function pickLocalizedValue(raw: any, locale?: string | null) {
-  console.log('Resolved file value (normalized):', raw);
-
   if (
     raw &&
     typeof raw === 'object' &&
@@ -126,6 +116,31 @@ function toSheetJSRows(
   return { rows, sheetNames: names };
 }
 
+function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
+  if (!obj || typeof obj !== 'object') return null;
+
+  const localized = pickLocalizedValue(obj, locale);
+  const cur = localized ?? obj;
+
+  if (Array.isArray(cur)) {
+    for (const item of cur) {
+      const hit = findFirstUploadInObject(item, locale);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  if (cur?.upload_id || cur?.upload?.id || (typeof cur === 'string' && cur.startsWith('http'))) {
+    return cur;
+  }
+
+  for (const key of Object.keys(cur)) {
+    const hit = findFirstUploadInObject(cur[key], locale);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 function Alert({ children }: { children: React.ReactNode }) {
   return (
     <div
@@ -145,8 +160,6 @@ function Alert({ children }: { children: React.ReactNode }) {
 // ======= Editor =======
 function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const params = getEditorParams(ctx);
-
-  // derive preferred api key order: URL override > ctx/appearance params > fallback
   const preferredApiKey =
     getUrlOverrideApiKey() || params.sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY;
 
@@ -156,7 +169,6 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
   const [sheet, setSheet] = useState<string | null>(null);
   const [sheetNames, setSheetNames] = useState<string[]>([]);
-
   const [rows, setRows] = useState<TableRow[]>(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
     return Array.isArray(initial) ? (initial as TableRow[]) : [];
@@ -169,73 +181,24 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     return Array.from(cols).map((c) => ({ field: c, editable: true }));
   }, [rows]);
 
- function getFileFieldValue() {
-  const preferredApiKey =
-    getUrlOverrideApiKey() || getEditorParams(ctx).sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY;
+  function getFileFieldValue() {
+    const fileFieldId = resolveFieldId(ctx, preferredApiKey);
+    let raw = fileFieldId ? (ctx.formValues as any)[fileFieldId] : undefined;
 
-  // 1) Try top-level field by apiKey/id
-  const fileFieldId = resolveFieldId(ctx, preferredApiKey);
-  let raw = fileFieldId ? (ctx.formValues as any)[fileFieldId] : undefined;
-
-  // 2) Handle localization wrapper
-  raw = pickLocalizedValue(raw, ctx.locale);
-
-  // 3) If the top-level is empty, try a recursive scan (covers blocks/modular content)
-  if (!raw) {
-    const found = findFirstUploadInObject(ctx.formValues, ctx.locale);
-    if (found) raw = found;
-  }
-
-  if (!raw) return null;
-
-  // 4) Multiple files → take the first
-  if (Array.isArray(raw)) raw = raw[0];
-
-  // 5) Normalize shapes
-  if (raw?.upload_id) return raw;
-  if (raw?.upload?.id) return { upload_id: raw.upload.id };
-
-  // Last resort: direct URL string (rare)
-  if (typeof raw === 'string' && raw.startsWith('http')) {
-    return { __direct_url: raw };
-  }
-
-  return null;
-}
-
-function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
-  if (!obj || typeof obj !== 'object') return null;
-
-  // If localized at this node, pick current-locale branch
-  const localized = pickLocalizedValue(obj, locale);
-
-  // Check direct shapes
-  const cur = localized ?? obj;
-
-  // a) Array of uploads or blocks
-  if (Array.isArray(cur)) {
-    for (const item of cur) {
-      const hit = findFirstUploadInObject(item, locale);
-      if (hit) return hit;
+    raw = pickLocalizedValue(raw, ctx.locale);
+    if (!raw) {
+      const found = findFirstUploadInObject(ctx.formValues, ctx.locale);
+      raw = found || null;
     }
+    if (!raw) return null;
+
+    if (Array.isArray(raw)) raw = raw[0];
+
+    if (raw?.upload_id) return raw;
+    if (raw?.upload?.id) return { upload_id: raw.upload.id };
+    if (typeof raw === 'string' && raw.startsWith('http')) return { __direct_url: raw };
     return null;
   }
-
-  // b) Direct upload-like shapes
-  if (cur?.upload_id || cur?.upload?.id || (typeof cur === 'string' && cur.startsWith('http'))) {
-    return cur;
-  }
-
-  // c) Walk object keys
-  for (const key of Object.keys(cur)) {
-    const hit = findFirstUploadInObject(cur[key], locale);
-    if (hit) return hit;
-  }
-
-  return null;
-}
-
-
 
   async function importFromSource() {
     try {
@@ -251,8 +214,8 @@ function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
       }
 
       const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
-
       let url: string | null = null;
+
       if ((fileVal as any).__direct_url) {
         url = (fileVal as any).__direct_url as string;
       } else {
@@ -278,7 +241,6 @@ function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
       setRows(parsed);
       setSheet(names[0] || null);
 
-      // optional meta
       if (params.columnsMetaApiKey) {
         await ctx.setFieldValue(params.columnsMetaApiKey, { columns: inferColumns(parsed) });
       }
@@ -314,13 +276,11 @@ function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
   function addRow() {
     setRows((r) => [...r, {}]);
   }
-
   function addColumn() {
     const newKey = `col_${Date.now().toString().slice(-4)}`;
     setRows((old) => old.map((r) => ({ ...r, [newKey]: (r as any)[newKey] ?? null })));
   }
 
-  // keep in sync with external changes
   useEffect(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
     if (Array.isArray(initial)) setRows(initial as TableRow[]);
@@ -355,75 +315,52 @@ function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
 
         {/* Optional: pick any upload directly (bypasses field resolution) */}
         <Button
-  onClick={async () => {
-    try {
-      setBusy(true);
-      setNotice(null);
+          onClick={async () => {
+            try {
+              setBusy(true);
+              setNotice(null);
+              const picker = (ctx as any).selectUpload;
+              if (!picker) {
+                setNotice('Upload picker not available in this SDK version.');
+                return;
+              }
+              const picked = await picker({ multiple: false });
+              if (!picked) { setNotice('No file picked.'); return; }
 
-      const picker = (ctx as any).selectUpload;
-      if (!picker) {
-        setNotice('Upload picker not available in this SDK version.');
-        return;
-      }
+              let url: string | null = (picked.url as string) || (picked.upload?.url as string) || null;
+              if (!url) {
+                const id =
+                  (picked.id as string) ||
+                  (picked.upload_id as string) ||
+                  (picked.upload?.id as string);
+                if (!id) { setNotice('Picked file has no URL or id; cannot resolve.'); return; }
+                const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
+                if (!token) { setNotice('CMA token required to resolve picked file URL (set it in Configuration).'); return; }
+                const client = buildClient({ apiToken: token });
+                const upload = await client.uploads.find(String(id));
+                url = (upload as any)?.url || null;
+              }
+              if (!url) { setNotice('Could not resolve a URL for the picked file.'); return; }
 
-      const picked = await picker({ multiple: false });
-      if (!picked) { setNotice('No file picked.'); return; }
+              const res = await fetch(url);
+              const buf = await res.arrayBuffer();
+              const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
+              setSheetNames(names);
+              setRows(parsed);
+              setSheet(names[0] || null);
+            } catch (e: any) {
+              setNotice(`Debug pick failed: ${e?.message || e}`);
+            } finally {
+              setBusy(false);
+            }
+          }}
+          disabled={busy}
+          buttonType="muted"
+          buttonSize="s"
+        >
+          Pick file (debug)
+        </Button>
 
-      // Try to get a direct URL from the picker payload
-      let url: string | null =
-        (picked.url as string) ||
-        (picked.upload?.url as string) ||
-        null;
-
-      // If there's no URL, resolve by id via CMA
-      if (!url) {
-        const id =
-          (picked.id as string) ||
-          (picked.upload_id as string) ||
-          (picked.upload?.id as string);
-
-        if (!id) {
-          setNotice('Picked file has no URL or id; cannot resolve.');
-          return;
-        }
-
-        const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
-        if (!token) {
-          setNotice('CMA token required to resolve picked file URL (set it in the plugin Configuration).');
-          return;
-        }
-
-        const client = buildClient({ apiToken: token });
-        const upload = await client.uploads.find(String(id));
-        url = (upload as any)?.url || null;
-      }
-
-      if (!url) {
-        setNotice('Could not resolve a URL for the picked file.');
-        return;
-      }
-
-      const res = await fetch(url);
-      const buf = await res.arrayBuffer();
-      const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
-      setSheetNames(names);
-      setRows(parsed);
-      setSheet(names[0] || null);
-    } catch (e: any) {
-      setNotice(`Debug pick failed: ${e?.message || e}`);
-    } finally {
-      setBusy(false);
-    }
-  }}
-  disabled={busy}
-  buttonType="muted"
-  buttonSize="s"
->
-  Pick file (debug)
-</Button>
-
-
-        {/* Sheet selector (native select to avoid UI-kit typing differences) */}
         {sheetNames.length > 1 && (
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 12, opacity: 0.8 }}>Sheet</span>
@@ -433,9 +370,7 @@ function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
               style={{ padding: 6, borderRadius: 6, border: '1px solid var(--border-color)' }}
             >
               {sheetNames.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
+                <option key={n} value={n}>{n}</option>
               ))}
             </select>
           </label>
@@ -461,15 +396,15 @@ function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
             )}
           </div>
           <div>
-            Resolved file field id:{' '}
-            {String(resolveFieldId(ctx, preferredApiKey))}
+            Resolved file field id: {String(resolveFieldId(ctx, preferredApiKey))}
           </div>
         </div>
       )}
 
-      {/* Legacy CSS theme wrapper */}
-      <div className="ag-theme-alpine" style={{ height: 420, width: '100%' }}>
+      {/* Theming API: pass theme object, no CSS theme class */}
+      <div style={{ height: 420, width: '100%' }}>
         <AgGridReact
+          theme={themeQuartz}
           rowData={rows as any[]}
           columnDefs={columnDefs as any}
           onCellValueChanged={(e: any) => {
