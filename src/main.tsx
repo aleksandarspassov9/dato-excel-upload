@@ -5,26 +5,29 @@ import {
   connect,
   type RenderFieldExtensionCtx,
 } from 'datocms-plugin-sdk';
-import { Canvas, Button, TextField, Spinner } from 'datocms-react-ui';
-
+import {
+  Canvas,
+  Button,
+  TextField,
+  Spinner,
+} from 'datocms-react-ui';
 import { buildClient } from '@datocms/cma-client-browser';
 import * as XLSX from 'xlsx';
 import { AgGridReact } from 'ag-grid-react';
 
-// AG Grid v31+ modular API: register a row model (enables Community features)
+// AG Grid v31+ modular registration (Community)
 import { ModuleRegistry, ClientSideRowModelModule } from 'ag-grid-community';
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
 
-// AG Grid CSS File Themes (legacy approach; DO NOT use Theming API simultaneously)
+// Legacy CSS themes (do NOT pass a theme object prop to AgGridReact)
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-alpine.css';
 
-// Dato UI kit styles
+// Dato UI styles
 import 'datocms-react-ui/styles.css';
 
-// ===== Config =====
-// TEMP hardcoded fallback so you can proceed even if ctx.parameters is empty
-const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile';
+// ======= Config / fallbacks =======
+const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile'; // your file field API key
 
 type TableRow = Record<string, unknown>;
 
@@ -34,14 +37,21 @@ type FieldParams = {
   rowCountApiKey?: string;
 };
 
-// ===== Helpers =====
+// ======= Helpers =======
+function getUrlOverrideApiKey(): string | undefined {
+  try {
+    const u = new URL(window.location.href);
+    return u.searchParams.get('fileApiKey') || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Prefer ctx.parameters, else field appearance, but we can work without either
 function getEditorParams(ctx: RenderFieldExtensionCtx): FieldParams {
   const direct = (ctx.parameters as any) || {};
-
-  console.log(ctx, 'params')
   if (direct && Object.keys(direct).length) return direct;
 
-  // Fallback for some SDK versions: read from field appearance
   const appearance =
     (ctx.field as any)?.attributes?.appearance?.parameters ||
     (ctx as any)?.fieldAppearance?.parameters ||
@@ -56,20 +66,18 @@ function resolveFieldId(
   const fields = Object.values(ctx.fields) as any[];
 
   if (preferred) {
-    // Treat value as ID
+    // treat as field ID
     const byId = (ctx.fields as any)[preferred];
     if (byId?.id) return byId.id;
 
-    // Or as API key
-    const byApiKey = fields.find(
-      f => (f.apiKey ?? f.attributes?.api_key) === preferred,
-    );
-    if (byApiKey) return byApiKey.id;
+    // or as API key
+    const match = fields.find((f) => (f.apiKey ?? f.attributes?.api_key) === preferred);
+    if (match) return match.id;
   }
 
-  // Fallback: first file field in the model
+  // fallback: first file field on the model
   const firstFile = fields.find(
-    f => (f.fieldType ?? f.attributes?.field_type) === 'file',
+    (f) => (f.fieldType ?? f.attributes?.field_type) === 'file',
   );
   return firstFile?.id ?? null;
 }
@@ -110,9 +118,7 @@ function toSheetJSRows(
   const wb = XLSX.read(binary, { type: 'array' });
   const names = wb.SheetNames;
   const target =
-    preferredSheet && names.includes(preferredSheet)
-      ? preferredSheet
-      : names[0];
+    preferredSheet && names.includes(preferredSheet) ? preferredSheet : names[0];
   const ws = wb.Sheets[target];
   const rows = XLSX.utils.sheet_to_json(ws, { defval: null }) as TableRow[];
   return { rows, sheetNames: names };
@@ -134,9 +140,13 @@ function Alert({ children }: { children: React.ReactNode }) {
   );
 }
 
-// ===== Editor =====
+// ======= Editor =======
 function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const params = getEditorParams(ctx);
+
+  // derive preferred api key order: URL override > ctx/appearance params > fallback
+  const preferredApiKey =
+    getUrlOverrideApiKey() || params.sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY;
 
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -152,17 +162,30 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
   const columnDefs = useMemo(() => {
     const cols = new Set<string>();
-    rows.forEach(r => Object.keys(r as object).forEach(k => cols.add(k)));
+    rows.forEach((r) => Object.keys(r as object).forEach((k) => cols.add(k)));
     if (cols.size === 0) cols.add('column1');
-    return Array.from(cols).map(c => ({ field: c, editable: true }));
+    return Array.from(cols).map((c) => ({ field: c, editable: true }));
   }, [rows]);
 
   function getFileFieldValue() {
-    const preferredKey = params.sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY;
-    const fileFieldId = resolveFieldId(ctx, preferredKey);
+    const fileFieldId = resolveFieldId(ctx, preferredApiKey);
     if (!fileFieldId) return null;
-    const raw = (ctx.formValues as any)[fileFieldId];
-    return pickLocalizedValue(raw, ctx.locale);
+
+    // raw can be localized or not
+    let raw = (ctx.formValues as any)[fileFieldId];
+    raw = pickLocalizedValue(raw, ctx.locale);
+    if (!raw) return null;
+
+    // multiple files → take first
+    if (Array.isArray(raw)) raw = raw[0];
+
+    // normalize to an object with upload_id (preferred), or allow direct URL (edge)
+    if (raw?.upload_id) return raw;
+    if (raw?.upload?.id) return { upload_id: raw.upload.id };
+    if (typeof raw === 'string' && raw.startsWith('http')) {
+      return { __direct_url: raw };
+    }
+    return null;
   }
 
   async function importFromSource() {
@@ -179,14 +202,20 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       }
 
       const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
-      if (!token) {
-        setNotice(
-          'Missing CMA token in plugin configuration (Settings → Plugins → this plugin → Configuration).',
-        );
-        return;
+
+      let url: string | null = null;
+      if ((fileVal as any).__direct_url) {
+        url = (fileVal as any).__direct_url as string;
+      } else {
+        if (!token) {
+          setNotice(
+            'Missing CMA token in plugin configuration (Settings → Plugins → this plugin → Configuration).',
+          );
+          return;
+        }
+        url = await fetchUploadUrlFromValue(fileVal, token);
       }
 
-      const url = await fetchUploadUrlFromValue(fileVal, token);
       if (!url) {
         setNotice('Could not resolve upload URL from the file field value.');
         return;
@@ -194,19 +223,15 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       const res = await fetch(url);
       const buf = await res.arrayBuffer();
-      const { rows: parsed, sheetNames: names } = toSheetJSRows(
-        buf,
-        sheet || undefined,
-      );
+      const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
 
       setSheetNames(names);
       setRows(parsed);
       setSheet(names[0] || null);
 
+      // optional meta
       if (params.columnsMetaApiKey) {
-        await ctx.setFieldValue(params.columnsMetaApiKey, {
-          columns: inferColumns(parsed),
-        });
+        await ctx.setFieldValue(params.columnsMetaApiKey, { columns: inferColumns(parsed) });
       }
       if (params.rowCountApiKey) {
         await ctx.setFieldValue(params.rowCountApiKey, parsed.length);
@@ -224,9 +249,7 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setNotice(null);
       await ctx.setFieldValue(ctx.fieldPath, rows);
       if (params.columnsMetaApiKey) {
-        await ctx.setFieldValue(params.columnsMetaApiKey, {
-          columns: inferColumns(rows),
-        });
+        await ctx.setFieldValue(params.columnsMetaApiKey, { columns: inferColumns(rows) });
       }
       if (params.rowCountApiKey) {
         await ctx.setFieldValue(params.rowCountApiKey, rows.length);
@@ -240,15 +263,15 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   }
 
   function addRow() {
-    setRows(r => [...r, {}]);
+    setRows((r) => [...r, {}]);
   }
 
   function addColumn() {
     const newKey = `col_${Date.now().toString().slice(-4)}`;
-    setRows(old => old.map(r => ({ ...r, [newKey]: (r as any)[newKey] ?? null })));
+    setRows((old) => old.map((r) => ({ ...r, [newKey]: (r as any)[newKey] ?? null })));
   }
 
-  // Keep in sync if formValues change externally
+  // keep in sync with external changes
   useEffect(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
     if (Array.isArray(initial)) setRows(initial as TableRow[]);
@@ -273,7 +296,7 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
           + Column
         </Button>
         <Button
-          onClick={() => setShowDebug(v => !v)}
+          onClick={() => setShowDebug((v) => !v)}
           disabled={busy}
           buttonType="muted"
           buttonSize="s"
@@ -281,27 +304,68 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
           {showDebug ? 'Hide debug' : 'Show debug'}
         </Button>
 
+        {/* Optional: pick any upload directly (bypasses field resolution) */}
+        <Button
+          onClick={async () => {
+            try {
+              setBusy(true);
+              setNotice(null);
+              const picker = (ctx as any).selectUpload;
+              if (!picker) {
+                setNotice('Upload picker not available in this SDK version.');
+                return;
+              }
+              const picked = await picker({ multiple: false });
+              if (!picked) {
+                setNotice('No file picked.');
+                return;
+              }
+              const res = await fetch(picked.url);
+              const buf = await res.arrayBuffer();
+              const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
+              setSheetNames(names);
+              setRows(parsed);
+              setSheet(names[0] || null);
+            } catch (e: any) {
+              setNotice(`Debug pick failed: ${e?.message || e}`);
+            } finally {
+              setBusy(false);
+            }
+          }}
+          disabled={busy}
+          buttonType="muted"
+          buttonSize="s"
+        >
+          Pick file (debug)
+        </Button>
+
+        {/* Sheet selector (native select to avoid UI-kit typing differences) */}
         {sheetNames.length > 1 && (
-  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-    <span style={{ fontSize: 12, opacity: 0.8 }}>Sheet</span>
-    <select
-      value={sheet ?? ''}
-      onChange={(e) => setSheet(e.target.value)}
-      style={{ padding: 6, borderRadius: 6, border: '1px solid var(--border-color)' }}
-    >
-      {sheetNames.map((n) => (
-        <option key={n} value={n}>{n}</option>
-      ))}
-    </select>
-  </label>
-)}
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12, opacity: 0.8 }}>Sheet</span>
+            <select
+              value={sheet ?? ''}
+              onChange={(e) => setSheet(e.target.value)}
+              style={{ padding: 6, borderRadius: 6, border: '1px solid var(--border-color)' }}
+            >
+              {sheetNames.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
 
       {showDebug && (
         <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
           <strong>Debug</strong>
           <div>Current locale: {String(ctx.locale)}</div>
-          <div>Params (ctx.parameters or appearance): {JSON.stringify(params)}</div>
+          <div>
+            Params (ctx.parameters or appearance): {JSON.stringify(params)} | URL override:{' '}
+            {String(getUrlOverrideApiKey())}
+          </div>
           <div>
             Available fields:{' '}
             {JSON.stringify(
@@ -314,12 +378,12 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
           </div>
           <div>
             Resolved file field id:{' '}
-            {String(resolveFieldId(ctx, params.sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY))}
+            {String(resolveFieldId(ctx, preferredApiKey))}
           </div>
         </div>
       )}
 
-      {/* Legacy CSS theme container (no Theming API prop) */}
+      {/* Legacy CSS theme wrapper */}
       <div className="ag-theme-alpine" style={{ height: 420, width: '100%' }}>
         <AgGridReact
           rowData={rows as any[]}
@@ -327,7 +391,7 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
           onCellValueChanged={(e: any) => {
             const { rowIndex, colDef, newValue } = e;
             const key = colDef.field as string;
-            setRows(prev => {
+            setRows((prev) => {
               const copy = [...prev];
               const row = { ...(copy[rowIndex] || {}) } as Record<string, unknown>;
               row[key] = newValue;
@@ -341,7 +405,7 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   );
 }
 
-// ===== Plugin config screen (CMA token) =====
+// ======= Config screen (CMA token) =======
 function Config({ ctx }: { ctx: any }) {
   const [token, setToken] = useState<string>(
     (ctx.plugin.attributes.parameters as any)?.cmaToken || '',
@@ -370,7 +434,7 @@ function Config({ ctx }: { ctx: any }) {
   );
 }
 
-// ===== Wiring =====
+// ======= Wire up the plugin =======
 connect({
   renderConfigScreen(ctx) {
     ReactDOM.createRoot(document.getElementById('root')!).render(<Config ctx={ctx} />);
@@ -405,8 +469,12 @@ if (window.self === window.top) {
     <div style={{ padding: 16 }}>
       <h3>Plugin dev harness</h3>
       <p>
-        This page is designed to be embedded in Dato. Add it as a Private Plugin, then attach it as the
-        Field editor for your <code>dataJson</code> field (Presentation tab).
+        Embed this in Dato as a Private Plugin and attach it as the Field editor for your
+        <code> dataJson</code> field (Presentation tab).
+      </p>
+      <p>
+        You can override the file field via URL:
+        <code>?fileApiKey=another_file_field</code>
       </p>
     </div>,
   );
