@@ -306,38 +306,73 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
         {/* Optional: pick any upload directly (bypasses field resolution) */}
         <Button
-          onClick={async () => {
-            try {
-              setBusy(true);
-              setNotice(null);
-              const picker = (ctx as any).selectUpload;
-              if (!picker) {
-                setNotice('Upload picker not available in this SDK version.');
-                return;
-              }
-              const picked = await picker({ multiple: false });
-              if (!picked) {
-                setNotice('No file picked.');
-                return;
-              }
-              const res = await fetch(picked.url);
-              const buf = await res.arrayBuffer();
-              const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
-              setSheetNames(names);
-              setRows(parsed);
-              setSheet(names[0] || null);
-            } catch (e: any) {
-              setNotice(`Debug pick failed: ${e?.message || e}`);
-            } finally {
-              setBusy(false);
-            }
-          }}
-          disabled={busy}
-          buttonType="muted"
-          buttonSize="s"
-        >
-          Pick file (debug)
-        </Button>
+  onClick={async () => {
+    try {
+      setBusy(true);
+      setNotice(null);
+
+      const picker = (ctx as any).selectUpload;
+      if (!picker) {
+        setNotice('Upload picker not available in this SDK version.');
+        return;
+      }
+
+      const picked = await picker({ multiple: false });
+      if (!picked) { setNotice('No file picked.'); return; }
+
+      // Try to get a direct URL from the picker payload
+      let url: string | null =
+        (picked.url as string) ||
+        (picked.upload?.url as string) ||
+        null;
+
+      // If there's no URL, resolve by id via CMA
+      if (!url) {
+        const id =
+          (picked.id as string) ||
+          (picked.upload_id as string) ||
+          (picked.upload?.id as string);
+
+        if (!id) {
+          setNotice('Picked file has no URL or id; cannot resolve.');
+          return;
+        }
+
+        const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
+        if (!token) {
+          setNotice('CMA token required to resolve picked file URL (set it in the plugin Configuration).');
+          return;
+        }
+
+        const client = buildClient({ apiToken: token });
+        const upload = await client.uploads.find(String(id));
+        url = (upload as any)?.url || null;
+      }
+
+      if (!url) {
+        setNotice('Could not resolve a URL for the picked file.');
+        return;
+      }
+
+      const res = await fetch(url);
+      const buf = await res.arrayBuffer();
+      const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
+      setSheetNames(names);
+      setRows(parsed);
+      setSheet(names[0] || null);
+    } catch (e: any) {
+      setNotice(`Debug pick failed: ${e?.message || e}`);
+    } finally {
+      setBusy(false);
+    }
+  }}
+  disabled={busy}
+  buttonType="muted"
+  buttonSize="s"
+>
+  Pick file (debug)
+</Button>
+
 
         {/* Sheet selector (native select to avoid UI-kit typing differences) */}
         {sheetNames.length > 1 && (
