@@ -20,7 +20,7 @@ import {
   ModuleRegistry,
   ClientSideRowModelModule,
   TextEditorModule,
-  // ValidationModule, // uncomment during dev for verbose console error messages
+  // ValidationModule, // (optional) enable during dev for verbose errors
   themeQuartz,
 } from 'ag-grid-community';
 
@@ -179,19 +179,6 @@ async function setFieldByApiOrId(ctx: RenderFieldExtensionCtx, apiKeyOrId: strin
   if (path) await ctx.setFieldValue(path, value);
 }
 
-// ALWAYS keep the JSON field as an object: { rows, meta }
-async function writeWrappedDataJson(
-  ctx: RenderFieldExtensionCtx,
-  rows: TableRow[]
-) {
-  const clean = sanitizeJSON(rows);
-  const payload = {
-    rows: clean,
-    meta: { columns: inferColumns(clean) },
-  };
-  await ctx.setFieldValue(ctx.fieldPath, payload);
-}
-
 function Alert({ children }: { children: React.ReactNode }) {
   return (
     <div
@@ -216,12 +203,13 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [showDebug, setShowDebug] = useState(false);
+
   const [sheet, setSheet] = useState<string | null>(null);
   const [sheetNames, setSheetNames] = useState<string[]>([]);
-
   const [rows, setRows] = useState<TableRow[]>(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
-    // Load rows from existing object wrapper if present
+    // If previous value was an object wrapper, try to load rows from it; else assume array
     if (initial && typeof initial === 'object' && !Array.isArray(initial) && (initial as any).rows) {
       return ((initial as any).rows as TableRow[]) || [];
     }
@@ -296,12 +284,16 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setRows(cleanRows);
       setSheet(names[0] || null);
 
-      // Keep field value in object shape immediately
-      await writeWrappedDataJson(ctx, cleanRows);
+      // Build and save object payload (passes JSON "object only" validation)
+      const payloadForDataJson = {
+        rows: cleanRows,
+        meta: { columns: inferColumns(cleanRows) },
+      };
+      await ctx.setFieldValue(ctx.fieldPath, payloadForDataJson);
 
       // Optional meta fields
       if (params.columnsMetaApiKey) {
-        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: inferColumns(cleanRows) });
+        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, payloadForDataJson.meta);
       }
       if (params.rowCountApiKey) {
         await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(cleanRows.length));
@@ -319,10 +311,15 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setNotice(null);
 
       const cleanRows = sanitizeJSON(rows);
-      await writeWrappedDataJson(ctx, cleanRows);
+      const payloadForDataJson = {
+        rows: cleanRows,
+        meta: { columns: inferColumns(cleanRows) },
+      };
+
+      await ctx.setFieldValue(ctx.fieldPath, payloadForDataJson);
 
       if (params.columnsMetaApiKey) {
-        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: inferColumns(cleanRows) });
+        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, payloadForDataJson.meta);
       }
       if (params.rowCountApiKey) {
         await setFieldByApiOrId(ctx, params.rowCountApiKey, Number((cleanRows as any[]).length));
@@ -336,39 +333,14 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     }
   }
 
-  // Inline edits: update state and immediately push wrapper to the form
-  const handleCellValueChanged = (e: any) => {
-    const { rowIndex, colDef, newValue } = e;
-    const key = colDef.field as string;
-
-    setRows(prev => {
-      const next = [...prev];
-      const row = { ...(next[rowIndex] || {}) } as Record<string, unknown>;
-      row[key] = sanitizeJSON(newValue);
-      next[rowIndex] = row;
-      // fire-and-forget (no await needed)
-      void writeWrappedDataJson(ctx, next);
-      return next;
-    });
-  };
-
   function addRow() {
-    setRows(prev => {
-      const next = [...prev, {}];
-      void writeWrappedDataJson(ctx, next);
-      return next;
-    });
+    setRows((r) => [...r, {}]);
   }
   function addColumn() {
     const newKey = `col_${Date.now().toString().slice(-4)}`;
-    setRows(prev => {
-      const next = prev.map(r => ({ ...r, [newKey]: (r as any)[newKey] ?? null }));
-      void writeWrappedDataJson(ctx, next);
-      return next;
-    });
+    setRows((old) => old.map((r) => ({ ...r, [newKey]: (r as any)[newKey] ?? null })));
   }
 
-  // If external changes write back to this field, reflect them
   useEffect(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
     if (initial && typeof initial === 'object' && !Array.isArray(initial) && (initial as any).rows) {
@@ -380,6 +352,9 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
   return (
     <Canvas ctx={ctx}>
+      {busy && <Spinner />}
+      {notice && <Alert>{notice}</Alert>}
+
       <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
         <Button onClick={importFromSource} disabled={busy} buttonType="primary">
           Import from source file
@@ -393,20 +368,130 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
         <Button onClick={addColumn} disabled={busy} buttonType="muted" buttonSize="s">
           + Column
         </Button>
+        <Button
+          onClick={() => setShowDebug((v) => !v)}
+          disabled={busy}
+          buttonType="muted"
+          buttonSize="s"
+        >
+          {showDebug ? 'Hide debug' : 'Show debug'}
+        </Button>
+
+        {/* Optional: pick any upload directly (bypasses field resolution) */}
+        <Button
+          onClick={async () => {
+            try {
+              setBusy(true);
+              setNotice(null);
+              const picker = (ctx as any).selectUpload;
+              if (!picker) {
+                setNotice('Upload picker not available in this SDK version.');
+                return;
+              }
+              const picked = await picker({ multiple: false });
+              if (!picked) { setNotice('No file picked.'); return; }
+
+              let url: string | null = (picked.url as string) || (picked.upload?.url as string) || null;
+              if (!url) {
+                const id =
+                  (picked.id as string) ||
+                  (picked.upload_id as string) ||
+                  (picked.upload?.id as string);
+                if (!id) { setNotice('Picked file has no URL or id; cannot resolve.'); return; }
+                const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
+                if (!token) { setNotice('CMA token required to resolve picked file URL (set it in Configuration).'); return; }
+                const client = buildClient({ apiToken: token });
+                const upload = await client.uploads.find(String(id));
+                url = (upload as any)?.url || null;
+              }
+              if (!url) { setNotice('Could not resolve a URL for the picked file.'); return; }
+
+              const res = await fetch(url);
+              const buf = await res.arrayBuffer();
+              const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
+
+              const cleanRows = sanitizeJSON(parsed);
+              setSheetNames(names);
+              setRows(cleanRows);
+              setSheet(names[0] || null);
+
+              const payloadForDataJson = {
+                rows: cleanRows,
+                meta: { columns: inferColumns(cleanRows) },
+              };
+              await ctx.setFieldValue(ctx.fieldPath, payloadForDataJson);
+            } catch (e: any) {
+              setNotice(`Debug pick failed: ${e?.message || e}`);
+            } finally {
+              setBusy(false);
+            }
+          }}
+          disabled={busy}
+          buttonType="muted"
+          buttonSize="s"
+        >
+          Pick file (debug)
+        </Button>
+
+        {sheetNames.length > 1 && (
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12, opacity: 0.8 }}>Sheet</span>
+            <select
+              value={sheet ?? ''}
+              onChange={(e) => setSheet(e.target.value)}
+              style={{ padding: 6, borderRadius: 6, border: '1px solid var(--border-color)' }}
+            >
+              {sheetNames.map((n) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
 
-      {busy && <Spinner />}
+      {showDebug && (
+        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
+          <strong>Debug</strong>
+          <div>Current locale: {String(ctx.locale)}</div>
+          <div>
+            Params (ctx.parameters or appearance): {JSON.stringify(params)} | URL override:{' '}
+            {String(getUrlOverrideApiKey())}
+          </div>
+          <div>
+            Available fields:{' '}
+            {JSON.stringify(
+              Object.values(ctx.fields).map((f: any) => ({
+                id: f.id,
+                apiKey: f.apiKey ?? f.attributes?.api_key,
+                type: f.fieldType ?? f.attributes?.field_type,
+              })),
+            )}
+          </div>
+          <div>
+            Resolved file field id: {String(resolveFieldId(ctx, preferredApiKey))}
+          </div>
+        </div>
+      )}
 
+      {/* Theming API (no CSS theme class) */}
       <div style={{ height: 420, width: '100%' }}>
         <AgGridReact
           theme={themeQuartz}
           rowData={rows as any[]}
           columnDefs={columnDefs as any}
-          onCellValueChanged={handleCellValueChanged}
+          onCellValueChanged={(e: any) => {
+            const { rowIndex, colDef, newValue } = e;
+            const key = colDef.field as string;
+            setRows((prev) => {
+              const copy = [...prev];
+              const row = { ...(copy[rowIndex] || {}) } as Record<string, unknown>;
+              row[key] = newValue;
+              copy[rowIndex] = row;
+              return copy;
+            });
+          }}
         />
       </div>
-
-      {notice && <Alert>{notice}</Alert>}
     </Canvas>
   );
 }
@@ -433,7 +518,7 @@ function Config({ ctx }: { ctx: any }) {
             ctx.notice('Saved plugin configuration.');
           }}
         >
-        Save configuration
+          Save configuration
         </Button>
       </div>
     </Canvas>
