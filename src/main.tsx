@@ -209,6 +209,19 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
         )}
       </div>
 
+      <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
+  <strong>Debug</strong>
+  <div>Param sourceFileApiKey: {String(params.sourceFileApiKey)}</div>
+  <div>All field API keys in this model:</div>
+  <ul>
+    {Object.values(ctx.fields).map((f: any) => (
+      <li key={f.id}>
+        id={f.id} apiKey={(f.apiKey ?? f.attributes?.api_key) || '(none)'}
+      </li>
+    ))}
+  </ul>
+</div>
+
       <div style={{ height: 400, width: '100%' }}>
         <AgGridReact
           theme={themeQuartz}
@@ -267,7 +280,7 @@ connect({
         type: 'editor',
         fieldTypes: ['json'],
         parameters: [
-          { id: 'sourceFileApiKey', name: 'Source File API key', type: 'string', required: true },
+          { id: 'sourceFileApiKey', name: 'sourcefile', type: 'string', required: true },
           { id: 'columnsMetaApiKey', name: 'Columns Meta API key', type: 'string' },
           { id: 'rowCountApiKey', name: 'Row Count API key', type: 'string' },
         ],
