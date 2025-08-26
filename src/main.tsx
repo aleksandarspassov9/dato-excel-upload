@@ -280,7 +280,7 @@ connect({
         type: 'editor',
         fieldTypes: ['json'],
         parameters: [
-          { id: 'sourceFileApiKey', name: 'sourcefile', type: 'string', required: true },
+          { id: 'sourcefile', name: 'Source File API key', type: 'string', required: true },
           { id: 'columnsMetaApiKey', name: 'Columns Meta API key', type: 'string' },
           { id: 'rowCountApiKey', name: 'Row Count API key', type: 'string' },
         ],
