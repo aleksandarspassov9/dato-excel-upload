@@ -3,13 +3,12 @@ import React, { useEffect, useMemo, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import {
   connect,
-  RenderFieldExtensionCtx,
+  type RenderFieldExtensionCtx,
 } from 'datocms-plugin-sdk';
 import {
   Canvas,
   Button,
   TextField,
-  SelectField,
   Spinner,
 } from 'datocms-react-ui';
 import { buildClient } from '@datocms/cma-client-browser';
@@ -236,15 +235,15 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
           {showDebug ? 'Hide debug' : 'Show debug'}
         </Button>
         {sheetNames.length > 1 && (
-          <SelectField
-            id="sheet"
-            name="sheet"
-            label="Sheet"
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 12, opacity: 0.8 }}>Sheet</span>
+          {/* <Dropdown
             value={sheet ?? ''}
             options={sheetNames.map((n) => ({ label: n, value: n }))}
-            onChange={(v) => setSheet((v ?? '') as string)}
-          />
-        )}
+            onChange={(v) => setSheet((v as string) ?? '')}
+          /> */}
+        </div>
+      )}
       </div>
 
       {showDebug && (
