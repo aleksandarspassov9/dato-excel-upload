@@ -97,6 +97,7 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   }, [rows]);
 
   function getFileFieldValue() {
+    console.log(params, 'params')
     const field = getFieldByApiKey(params.sourceFileApiKey, ctx);
     if (!field) return null;
     return (ctx.formValues as any)[field.id] ?? null;
