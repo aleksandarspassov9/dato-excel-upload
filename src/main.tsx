@@ -275,20 +275,34 @@ connect({
   },
 
   manualFieldExtensions() {
-    return [
-      {
-        id: 'excelJsonEditor',
-        name: 'Excel → Editable JSON Table',
-        type: 'editor',
-        fieldTypes: ['json'],
-        parameters: [
-          { id: 'sourceFileApiKey', name: 'Source File API key', type: 'string', required: true },
-          { id: 'columnsMetaApiKey', name: 'Columns Meta API key', type: 'string' },
-          { id: 'rowCountApiKey',  name: 'Row Count API key',    type: 'string' },
-        ],
-      },
-    ];
-  },
+  return [
+    {
+      id: 'excelJsonEditor',
+      name: 'Excel → Editable JSON Table',
+      type: 'editor',
+      fieldTypes: ['json'],
+      parameters: [
+        {
+          id: 'sourceFileApiKey',
+          name: 'Source File API key',
+          type: 'string',
+          required: true,
+        },
+        {
+          id: 'columnsMetaApiKey',
+          name: 'Columns Meta API key',
+          type: 'string',
+        },
+        {
+          id: 'rowCountApiKey',
+          name: 'Row Count API key',
+          type: 'string',
+        },
+      ],
+    },
+  ];
+}
+,
 
   renderFieldExtension(id, ctx) {
     if (id === 'excelJsonEditor') {
