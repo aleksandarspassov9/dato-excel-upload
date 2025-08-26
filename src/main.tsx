@@ -246,18 +246,23 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       const res = await fetch(url);
       const buf = await res.arrayBuffer();
-      const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
 
-      setSheetNames(names);
-      setRows(parsed);
-      setSheet(names[0] || null);
+      const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
+const cleanParsed = sanitizeJSON(parsed);
+
+setSheetNames(names);
+setRows(cleanParsed);
+setSheet(names[0] || null);
+
 
       if (params.columnsMetaApiKey) {
-        await ctx.setFieldValue(params.columnsMetaApiKey, { columns: inferColumns(parsed) });
-      }
-      if (params.rowCountApiKey) {
-        await ctx.setFieldValue(params.rowCountApiKey, parsed.length);
-      }
+  await setFieldByApiOrId(ctx, params.columnsMetaApiKey, {
+    columns: inferColumns(cleanParsed),
+  });
+}
+if (params.rowCountApiKey) {
+  await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(cleanParsed.length));
+}
     } catch (e: any) {
       setNotice(`Import failed: ${e?.message || e}`);
     } finally {
@@ -265,24 +270,63 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     }
   }
 
-  async function saveJson() {
-    try {
-      setBusy(true);
-      setNotice(null);
-      await ctx.setFieldValue(ctx.fieldPath, rows);
-      if (params.columnsMetaApiKey) {
-        await ctx.setFieldValue(params.columnsMetaApiKey, { columns: inferColumns(rows) });
-      }
-      if (params.rowCountApiKey) {
-        await ctx.setFieldValue(params.rowCountApiKey, rows.length);
-      }
-      ctx.notice('Saved table JSON to field.');
-    } catch (e: any) {
-      setNotice(`Save failed: ${e?.message || e}`);
-    } finally {
-      setBusy(false);
-    }
+  function getFieldPath(ctx: RenderFieldExtensionCtx, apiKeyOrId: string): string | null {
+  const id = resolveFieldId(ctx, apiKeyOrId);
+  if (!id) return null;
+  return ctx.locale ? `${id}.${ctx.locale}` : id;
+}
+
+// Set a field value by API key or ID safely
+async function setFieldByApiOrId(
+  ctx: RenderFieldExtensionCtx,
+  apiKeyOrId: string,
+  value: unknown
+) {
+  const path = getFieldPath(ctx, apiKeyOrId);
+  if (!path) return;
+  await ctx.setFieldValue(path, value);
+}
+
+// Ensure we never send undefined/NaN (Dato rejects non-JSON values)
+function sanitizeJSON(x: any): any {
+  if (x === undefined || (typeof x === 'number' && Number.isNaN(x))) return null;
+  if (Array.isArray(x)) return x.map(sanitizeJSON);
+  if (x && typeof x === 'object') {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(x)) out[k] = sanitizeJSON(v);
+    return out;
   }
+  return x;
+}
+
+  async function saveJson() {
+  try {
+    setBusy(true);
+    setNotice(null);
+
+    const cleanRows = sanitizeJSON(rows);
+
+    // Save into THIS JSON field (ctx.fieldPath already includes locale/id)
+    await ctx.setFieldValue(ctx.fieldPath, cleanRows);
+
+    // Optional meta fields — write using field IDs/paths, not API keys directly
+    if (params.columnsMetaApiKey) {
+      await setFieldByApiOrId(ctx, params.columnsMetaApiKey, {
+        columns: inferColumns(cleanRows),
+      });
+    }
+    if (params.rowCountApiKey) {
+      await setFieldByApiOrId(ctx, params.rowCountApiKey, Number((cleanRows as any[]).length));
+    }
+
+    ctx.notice('Saved table JSON to field.');
+  } catch (e: any) {
+    setNotice(`Save failed: ${e?.message || e}`);
+  } finally {
+    setBusy(false);
+  }
+}
+
 
   function addRow() {
     setRows((r) => [...r, {}]);
