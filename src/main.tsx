@@ -83,6 +83,8 @@ function resolveFieldId(
 }
 
 function pickLocalizedValue(raw: any, locale?: string | null) {
+  console.log('Resolved file value (normalized):', raw);
+
   if (
     raw &&
     typeof raw === 'object' &&
