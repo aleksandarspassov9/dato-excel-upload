@@ -37,6 +37,8 @@ type FieldParams = {
 // ===== Helpers =====
 function getEditorParams(ctx: RenderFieldExtensionCtx): FieldParams {
   const direct = (ctx.parameters as any) || {};
+
+  console.log(ctx, 'params')
   if (direct && Object.keys(direct).length) return direct;
 
   // Fallback for some SDK versions: read from field appearance
@@ -156,7 +158,6 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   }, [rows]);
 
   function getFileFieldValue() {
-    console.log(params, 'params')
     const preferredKey = params.sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY;
     const fileFieldId = resolveFieldId(ctx, preferredKey);
     if (!fileFieldId) return null;
