@@ -150,6 +150,12 @@ function toStringValue(v: unknown): string {
   if (typeof v === 'number' && Number.isNaN(v)) return '';
   return String(v);
 }
+
+function toMatrixPayload(rowsObj: Array<Record<string, string>>, columns: string[]) {
+  const data = rowsObj.map(r => columns.map(c => (r[c] ?? '')));
+  return { columns, data };
+}
+
 /** Normalize to safe column names and **string** cell values */
 function normalizeSheetRowsStrings(rows: TableRow[]): { rows: TableRow[]; columns: string[] } {
   if (!rows || rows.length === 0) return { rows: [], columns: [] };
@@ -295,7 +301,8 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setSheet(names[0] || null);
 
       // write ONLY { rows } into the field to satisfy strict JSON validation
-      await ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
+      const payload = toMatrixPayload(normalized.rows as Array<Record<string,string>>, normalized.columns);
+      await ctx.setFieldValue(ctx.fieldPath, payload);
 
       // Optional meta fields
       if (params.columnsMetaApiKey) {
@@ -317,7 +324,8 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setNotice(null);
 
       const normalized = normalizeSheetRowsStrings(rows as TableRow[]);
-      await ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
+      const payload = toMatrixPayload(normalized.rows as Array<Record<string,string>>, normalized.columns);
+      await ctx.setFieldValue(ctx.fieldPath, payload);
 
       if (params.columnsMetaApiKey) {
         await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: normalized.columns });
