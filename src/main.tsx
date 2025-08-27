@@ -145,21 +145,6 @@ function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
   return null;
 }
 
-// ---- Strict/safe normalization: keys and string values ----
-function sanitizeKey(raw: string, index: number): string {
-  const base = (raw || '').toString().trim();
-  const candidate = base && base !== '__EMPTY' ? base : `column_${index + 1}`;
-  const cleaned = candidate.replace(/[^a-zA-Z0-9_ ]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return cleaned || `column_${index + 1}`;
-}
-function uniqueKeys(keys: string[]): string[] {
-  const seen = new Map<string, number>();
-  return keys.map((k) => {
-    const c = seen.get(k) ?? 0;
-    seen.set(k, c + 1);
-    return c === 0 ? k : `${k}_${c + 1}`;
-  });
-}
 function toStringValue(v: unknown): string {
   if (v === null || v === undefined) return '';
   if (typeof v === 'number' && Number.isNaN(v)) return '';
@@ -168,27 +153,24 @@ function toStringValue(v: unknown): string {
 /** Normalize to safe column names and **string** cell values */
 function normalizeSheetRowsStrings(rows: TableRow[]): { rows: TableRow[]; columns: string[] } {
   if (!rows || rows.length === 0) return { rows: [], columns: [] };
-  const firstRow = rows[0] as Record<string, unknown>;
-  const candidateKeys = Object.keys(firstRow);
-  const safe = uniqueKeys(candidateKeys.map((k, i) => sanitizeKey(k, i)));
 
-  const keyMap = new Map<string, string>();
-  candidateKeys.forEach((orig, i) => keyMap.set(orig, safe[i]));
+  // Force generic names
+  const firstRow = rows[0] as Record<string, unknown>;
+  const colCount = Object.keys(firstRow).length;
+  const safe = Array.from({ length: colCount }, (_, i) => `column_${i+1}`);
 
   const normalizedRows = rows.map((r) => {
-    const obj = r as Record<string, unknown>;
+    const values = Object.values(r);
     const out: Record<string, string> = {};
-    for (const [origKey, val] of Object.entries(obj)) {
-      const mapped = keyMap.get(origKey) ?? sanitizeKey(origKey, 0);
-      out[mapped] = toStringValue(val);
-    }
-    // ensure all columns present
-    safe.forEach((k) => { if (!(k in out)) out[k] = ''; });
+    safe.forEach((col, i) => {
+      out[col] = toStringValue(values[i]);
+    });
     return out;
   });
 
   return { rows: normalizedRows, columns: safe };
 }
+
 
 // resolve id/apiKey to the correct path (handles locale)
 function getFieldPath(ctx: RenderFieldExtensionCtx, apiKeyOrId: string): string | null {
@@ -234,7 +216,7 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const [sheetNames, setSheetNames] = useState<string[]>([]);
 
   console.log("Available sheets:", sheetNames);
-  
+
   const [rows, setRows] = useState<TableRow[]>(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
     // Load rows from existing object wrapper if present
