@@ -233,6 +233,8 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const [sheet, setSheet] = useState<string | null>(null);
   const [sheetNames, setSheetNames] = useState<string[]>([]);
 
+  console.log("Available sheets:", sheetNames);
+  
   const [rows, setRows] = useState<TableRow[]>(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
     // Load rows from existing object wrapper if present
