@@ -279,24 +279,22 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       const buf = await res.arrayBuffer();
       const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
 
-      const cleanRows = sanitizeJSON(parsed);
+      // Normalize headers/rows to safe keys, no __EMPTY, no blanks, unique keys
+      const normalized = normalizeSheetRows(sanitizeJSON(parsed) as TableRow[]);
+
       setSheetNames(names);
-      setRows(cleanRows);
+      setRows(normalized.rows);
       setSheet(names[0] || null);
 
-      // Build and save object payload (passes JSON "object only" validation)
-      const payloadForDataJson = {
-        rows: cleanRows,
-        meta: { columns: inferColumns(cleanRows) },
-      };
-      await ctx.setFieldValue(ctx.fieldPath, payloadForDataJson);
+      // Save ONLY { rows } — no meta — to satisfy strict JSON Schema/validation
+      await ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
 
       // Optional meta fields
       if (params.columnsMetaApiKey) {
-        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, payloadForDataJson.meta);
+        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: normalized.columns });
       }
       if (params.rowCountApiKey) {
-        await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(cleanRows.length));
+        await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(normalized.rows.length));
       }
     } catch (e: any) {
       setNotice(`Import failed: ${e?.message || e}`);
@@ -305,40 +303,81 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     }
   }
 
-  async function saveJson() {
-    try {
-      setBusy(true);
-      setNotice(null);
+async function saveJson() {
+  try {
+    setBusy(true);
+    setNotice(null);
 
-      const cleanRows = sanitizeJSON(rows);
-      const payloadForDataJson = {
-        rows: cleanRows,
-        meta: { columns: inferColumns(cleanRows) },
-      };
+    const normalized = normalizeSheetRows(sanitizeJSON(rows) as TableRow[]);
+    await ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
 
-      await ctx.setFieldValue(ctx.fieldPath, payloadForDataJson);
-
-      if (params.columnsMetaApiKey) {
-        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, payloadForDataJson.meta);
-      }
-      if (params.rowCountApiKey) {
-        await setFieldByApiOrId(ctx, params.rowCountApiKey, Number((cleanRows as any[]).length));
-      }
-
-      ctx.notice('Saved table JSON to field.');
-    } catch (e: any) {
-      setNotice(`Save failed: ${e?.message || e}`);
-    } finally {
-      setBusy(false);
+    if (params.columnsMetaApiKey) {
+      await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: normalized.columns });
     }
-  }
+    if (params.rowCountApiKey) {
+      await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(normalized.rows.length));
+    }
 
+    ctx.notice('Saved table JSON to field.');
+  } catch (e: any) {
+    setNotice(`Save failed: ${e?.message || e}`);
+  } finally {
+    setBusy(false);
+  }
+}
   function addRow() {
     setRows((r) => [...r, {}]);
   }
   function addColumn() {
     const newKey = `col_${Date.now().toString().slice(-4)}`;
     setRows((old) => old.map((r) => ({ ...r, [newKey]: (r as any)[newKey] ?? null })));
+  }
+
+  function sanitizeKey(raw: string, index: number): string {
+    const base = (raw || '').toString().trim();
+    const candidate = base && base !== '__EMPTY' ? base : `column_${index + 1}`;
+    // keep letters, numbers, spaces and underscores; then collapse spaces to single space
+    const cleaned = candidate.replace(/[^a-zA-Z0-9_ ]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return cleaned || `column_${index + 1}`;
+  }
+
+  function uniqueKeys(keys: string[]): string[] {
+    const seen = new Map<string, number>();
+    return keys.map((k) => {
+      const count = seen.get(k) ?? 0;
+      seen.set(k, count + 1);
+      return count === 0 ? k : `${k}_${count + 1}`;
+    });
+  }
+
+  function normalizeSheetRows(rows: TableRow[]): { rows: TableRow[]; columns: string[] } {
+    if (!rows || rows.length === 0) return { rows: [], columns: [] };
+
+    // Collect candidate headers from first row’s keys in order
+    const firstRow = rows[0] as Record<string, unknown>;
+    const candidateKeys = Object.keys(firstRow);
+
+    // SheetJS uses headers like "__EMPTY" or empty strings for blank headers
+    const safe = uniqueKeys(candidateKeys.map((k, i) => sanitizeKey(k, i)));
+
+    // Build a mapping from original -> safe
+    const keyMap = new Map<string, string>();
+    candidateKeys.forEach((orig, i) => keyMap.set(orig, safe[i]));
+
+    // Remap all rows to safe keys and sanitize cell values
+    const normalizedRows = rows.map((r) => {
+      const obj = r as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const [origKey, val] of Object.entries(obj)) {
+        const mapped = keyMap.get(origKey) ?? sanitizeKey(origKey, 0);
+        out[mapped] = sanitizeJSON(val);
+      }
+      // Ensure all columns exist (fill missing with null)
+      safe.forEach((k) => { if (!(k in out)) out[k] = null; });
+      return out;
+    });
+
+    return { rows: normalizedRows, columns: safe };
   }
 
   useEffect(() => {
