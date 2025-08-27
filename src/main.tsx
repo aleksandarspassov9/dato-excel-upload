@@ -153,7 +153,7 @@ function toStringValue(v: unknown): string {
 
 function toMatrixPayload(rowsObj: Array<Record<string, string>>, columns: string[]) {
   const data = rowsObj.map(r => columns.map(c => (r[c] ?? '')));
-  return { columns, data };
+  return JSON.stringify({ columns, data });
 }
 
 /** Normalize to safe column names and **string** cell values */
