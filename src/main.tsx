@@ -20,14 +20,12 @@ import {
   ModuleRegistry,
   ClientSideRowModelModule,
   TextEditorModule,
-  // ValidationModule, // (optional) enable during dev for verbose errors
   themeQuartz,
 } from 'ag-grid-community';
 
 ModuleRegistry.registerModules([
   ClientSideRowModelModule,
   TextEditorModule,
-  // ValidationModule,
 ]);
 
 // Dato UI styles
@@ -109,11 +107,6 @@ async function fetchUploadUrlFromValue(
   return (upload as any)?.url || null;
 }
 
-function inferColumns(rows: TableRow[]): string[] {
-  const first = rows?.[0] || {};
-  return Object.keys(first as object);
-}
-
 function toSheetJSRows(
   binary: ArrayBuffer,
   preferredSheet?: string,
@@ -152,16 +145,49 @@ function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
   return null;
 }
 
-// sanitize to valid JSON (replace undefined/NaN with null)
-function sanitizeJSON(x: any): any {
-  if (x === undefined || (typeof x === 'number' && Number.isNaN(x))) return null;
-  if (Array.isArray(x)) return x.map(sanitizeJSON);
-  if (x && typeof x === 'object') {
-    const out: Record<string, any> = {};
-    for (const [k, v] of Object.entries(x)) out[k] = sanitizeJSON(v);
+// ---- Strict/safe normalization: keys and string values ----
+function sanitizeKey(raw: string, index: number): string {
+  const base = (raw || '').toString().trim();
+  const candidate = base && base !== '__EMPTY' ? base : `column_${index + 1}`;
+  const cleaned = candidate.replace(/[^a-zA-Z0-9_ ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleaned || `column_${index + 1}`;
+}
+function uniqueKeys(keys: string[]): string[] {
+  const seen = new Map<string, number>();
+  return keys.map((k) => {
+    const c = seen.get(k) ?? 0;
+    seen.set(k, c + 1);
+    return c === 0 ? k : `${k}_${c + 1}`;
+  });
+}
+function toStringValue(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'number' && Number.isNaN(v)) return '';
+  return String(v);
+}
+/** Normalize to safe column names and **string** cell values */
+function normalizeSheetRowsStrings(rows: TableRow[]): { rows: TableRow[]; columns: string[] } {
+  if (!rows || rows.length === 0) return { rows: [], columns: [] };
+  const firstRow = rows[0] as Record<string, unknown>;
+  const candidateKeys = Object.keys(firstRow);
+  const safe = uniqueKeys(candidateKeys.map((k, i) => sanitizeKey(k, i)));
+
+  const keyMap = new Map<string, string>();
+  candidateKeys.forEach((orig, i) => keyMap.set(orig, safe[i]));
+
+  const normalizedRows = rows.map((r) => {
+    const obj = r as Record<string, unknown>;
+    const out: Record<string, string> = {};
+    for (const [origKey, val] of Object.entries(obj)) {
+      const mapped = keyMap.get(origKey) ?? sanitizeKey(origKey, 0);
+      out[mapped] = toStringValue(val);
+    }
+    // ensure all columns present
+    safe.forEach((k) => { if (!(k in out)) out[k] = ''; });
     return out;
-  }
-  return x;
+  });
+
+  return { rows: normalizedRows, columns: safe };
 }
 
 // resolve id/apiKey to the correct path (handles locale)
@@ -203,13 +229,13 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [showDebug, setShowDebug] = useState(false);
 
   const [sheet, setSheet] = useState<string | null>(null);
   const [sheetNames, setSheetNames] = useState<string[]>([]);
+
   const [rows, setRows] = useState<TableRow[]>(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
-    // If previous value was an object wrapper, try to load rows from it; else assume array
+    // Load rows from existing object wrapper if present
     if (initial && typeof initial === 'object' && !Array.isArray(initial) && (initial as any).rows) {
       return ((initial as any).rows as TableRow[]) || [];
     }
@@ -279,14 +305,12 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       const buf = await res.arrayBuffer();
       const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
 
-      // Normalize headers/rows to safe keys, no __EMPTY, no blanks, unique keys
-      const normalized = normalizeSheetRows(sanitizeJSON(parsed) as TableRow[]);
-
+      const normalized = normalizeSheetRowsStrings(parsed as TableRow[]);
       setSheetNames(names);
       setRows(normalized.rows);
       setSheet(names[0] || null);
 
-      // Save ONLY { rows } — no meta — to satisfy strict JSON Schema/validation
+      // write ONLY { rows } into the field to satisfy strict JSON validation
       await ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
 
       // Optional meta fields
@@ -303,83 +327,66 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     }
   }
 
-async function saveJson() {
-  try {
-    setBusy(true);
-    setNotice(null);
+  async function saveJson() {
+    try {
+      setBusy(true);
+      setNotice(null);
 
-    const normalized = normalizeSheetRows(sanitizeJSON(rows) as TableRow[]);
-    await ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
+      const normalized = normalizeSheetRowsStrings(rows as TableRow[]);
+      await ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
 
-    if (params.columnsMetaApiKey) {
-      await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: normalized.columns });
+      if (params.columnsMetaApiKey) {
+        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: normalized.columns });
+      }
+      if (params.rowCountApiKey) {
+        await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(normalized.rows.length));
+      }
+
+      ctx.notice('Saved table JSON to field.');
+    } catch (e: any) {
+      setNotice(`Save failed: ${e?.message || e}`);
+    } finally {
+      setBusy(false);
     }
-    if (params.rowCountApiKey) {
-      await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(normalized.rows.length));
-    }
-
-    ctx.notice('Saved table JSON to field.');
-  } catch (e: any) {
-    setNotice(`Save failed: ${e?.message || e}`);
-  } finally {
-    setBusy(false);
   }
-}
+
+  // Inline edits: update state and immediately push normalized { rows } to the form
+  const handleCellValueChanged = (e: any) => {
+    const { rowIndex, colDef, newValue } = e;
+    const key = colDef.field as string;
+
+    setRows(prev => {
+      const next = [...prev];
+      const row = { ...(next[rowIndex] || {}) } as Record<string, unknown>;
+      row[key] = toStringValue(newValue);
+      next[rowIndex] = row;
+
+      const normalized = normalizeSheetRowsStrings(next as TableRow[]);
+      void ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
+
+      return next;
+    });
+  };
+
   function addRow() {
-    setRows((r) => [...r, {}]);
+    setRows(prev => {
+      const next = [...prev, {}];
+      const normalized = normalizeSheetRowsStrings(next as TableRow[]);
+      void ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
+      return next;
+    });
   }
   function addColumn() {
-    const newKey = `col_${Date.now().toString().slice(-4)}`;
-    setRows((old) => old.map((r) => ({ ...r, [newKey]: (r as any)[newKey] ?? null })));
-  }
-
-  function sanitizeKey(raw: string, index: number): string {
-    const base = (raw || '').toString().trim();
-    const candidate = base && base !== '__EMPTY' ? base : `column_${index + 1}`;
-    // keep letters, numbers, spaces and underscores; then collapse spaces to single space
-    const cleaned = candidate.replace(/[^a-zA-Z0-9_ ]+/g, ' ').replace(/\s+/g, ' ').trim();
-    return cleaned || `column_${index + 1}`;
-  }
-
-  function uniqueKeys(keys: string[]): string[] {
-    const seen = new Map<string, number>();
-    return keys.map((k) => {
-      const count = seen.get(k) ?? 0;
-      seen.set(k, count + 1);
-      return count === 0 ? k : `${k}_${count + 1}`;
+    const newKey = `column_${Date.now().toString().slice(-4)}`;
+    setRows(prev => {
+      const next = prev.map(r => ({ ...r, [newKey]: (r as any)[newKey] ?? '' }));
+      const normalized = normalizeSheetRowsStrings(next as TableRow[]);
+      void ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
+      return next;
     });
   }
 
-  function normalizeSheetRows(rows: TableRow[]): { rows: TableRow[]; columns: string[] } {
-    if (!rows || rows.length === 0) return { rows: [], columns: [] };
-
-    // Collect candidate headers from first row’s keys in order
-    const firstRow = rows[0] as Record<string, unknown>;
-    const candidateKeys = Object.keys(firstRow);
-
-    // SheetJS uses headers like "__EMPTY" or empty strings for blank headers
-    const safe = uniqueKeys(candidateKeys.map((k, i) => sanitizeKey(k, i)));
-
-    // Build a mapping from original -> safe
-    const keyMap = new Map<string, string>();
-    candidateKeys.forEach((orig, i) => keyMap.set(orig, safe[i]));
-
-    // Remap all rows to safe keys and sanitize cell values
-    const normalizedRows = rows.map((r) => {
-      const obj = r as Record<string, unknown>;
-      const out: Record<string, unknown> = {};
-      for (const [origKey, val] of Object.entries(obj)) {
-        const mapped = keyMap.get(origKey) ?? sanitizeKey(origKey, 0);
-        out[mapped] = sanitizeJSON(val);
-      }
-      // Ensure all columns exist (fill missing with null)
-      safe.forEach((k) => { if (!(k in out)) out[k] = null; });
-      return out;
-    });
-
-    return { rows: normalizedRows, columns: safe };
-  }
-
+  // If external changes write back to this field, reflect them
   useEffect(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
     if (initial && typeof initial === 'object' && !Array.isArray(initial) && (initial as any).rows) {
@@ -391,9 +398,6 @@ async function saveJson() {
 
   return (
     <Canvas ctx={ctx}>
-      {busy && <Spinner />}
-      {notice && <Alert>{notice}</Alert>}
-
       <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
         <Button onClick={importFromSource} disabled={busy} buttonType="primary">
           Import from source file
@@ -407,130 +411,20 @@ async function saveJson() {
         <Button onClick={addColumn} disabled={busy} buttonType="muted" buttonSize="s">
           + Column
         </Button>
-        <Button
-          onClick={() => setShowDebug((v) => !v)}
-          disabled={busy}
-          buttonType="muted"
-          buttonSize="s"
-        >
-          {showDebug ? 'Hide debug' : 'Show debug'}
-        </Button>
-
-        {/* Optional: pick any upload directly (bypasses field resolution) */}
-        <Button
-          onClick={async () => {
-            try {
-              setBusy(true);
-              setNotice(null);
-              const picker = (ctx as any).selectUpload;
-              if (!picker) {
-                setNotice('Upload picker not available in this SDK version.');
-                return;
-              }
-              const picked = await picker({ multiple: false });
-              if (!picked) { setNotice('No file picked.'); return; }
-
-              let url: string | null = (picked.url as string) || (picked.upload?.url as string) || null;
-              if (!url) {
-                const id =
-                  (picked.id as string) ||
-                  (picked.upload_id as string) ||
-                  (picked.upload?.id as string);
-                if (!id) { setNotice('Picked file has no URL or id; cannot resolve.'); return; }
-                const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
-                if (!token) { setNotice('CMA token required to resolve picked file URL (set it in Configuration).'); return; }
-                const client = buildClient({ apiToken: token });
-                const upload = await client.uploads.find(String(id));
-                url = (upload as any)?.url || null;
-              }
-              if (!url) { setNotice('Could not resolve a URL for the picked file.'); return; }
-
-              const res = await fetch(url);
-              const buf = await res.arrayBuffer();
-              const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
-
-              const cleanRows = sanitizeJSON(parsed);
-              setSheetNames(names);
-              setRows(cleanRows);
-              setSheet(names[0] || null);
-
-              const payloadForDataJson = {
-                rows: cleanRows,
-                meta: { columns: inferColumns(cleanRows) },
-              };
-              await ctx.setFieldValue(ctx.fieldPath, payloadForDataJson);
-            } catch (e: any) {
-              setNotice(`Debug pick failed: ${e?.message || e}`);
-            } finally {
-              setBusy(false);
-            }
-          }}
-          disabled={busy}
-          buttonType="muted"
-          buttonSize="s"
-        >
-          Pick file (debug)
-        </Button>
-
-        {sheetNames.length > 1 && (
-          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 12, opacity: 0.8 }}>Sheet</span>
-            <select
-              value={sheet ?? ''}
-              onChange={(e) => setSheet(e.target.value)}
-              style={{ padding: 6, borderRadius: 6, border: '1px solid var(--border-color)' }}
-            >
-              {sheetNames.map((n) => (
-                <option key={n} value={n}>{n}</option>
-              ))}
-            </select>
-          </label>
-        )}
       </div>
 
-      {showDebug && (
-        <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
-          <strong>Debug</strong>
-          <div>Current locale: {String(ctx.locale)}</div>
-          <div>
-            Params (ctx.parameters or appearance): {JSON.stringify(params)} | URL override:{' '}
-            {String(getUrlOverrideApiKey())}
-          </div>
-          <div>
-            Available fields:{' '}
-            {JSON.stringify(
-              Object.values(ctx.fields).map((f: any) => ({
-                id: f.id,
-                apiKey: f.apiKey ?? f.attributes?.api_key,
-                type: f.fieldType ?? f.attributes?.field_type,
-              })),
-            )}
-          </div>
-          <div>
-            Resolved file field id: {String(resolveFieldId(ctx, preferredApiKey))}
-          </div>
-        </div>
-      )}
+      {busy && <Spinner />}
 
-      {/* Theming API (no CSS theme class) */}
       <div style={{ height: 420, width: '100%' }}>
         <AgGridReact
           theme={themeQuartz}
           rowData={rows as any[]}
           columnDefs={columnDefs as any}
-          onCellValueChanged={(e: any) => {
-            const { rowIndex, colDef, newValue } = e;
-            const key = colDef.field as string;
-            setRows((prev) => {
-              const copy = [...prev];
-              const row = { ...(copy[rowIndex] || {}) } as Record<string, unknown>;
-              row[key] = newValue;
-              copy[rowIndex] = row;
-              return copy;
-            });
-          }}
+          onCellValueChanged={handleCellValueChanged}
         />
       </div>
+
+      {notice && <Alert>{notice}</Alert>}
     </Canvas>
   );
 }
