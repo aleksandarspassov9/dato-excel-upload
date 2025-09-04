@@ -1,5 +1,5 @@
 // src/main.tsx
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import {
   connect,
@@ -13,20 +13,6 @@ import {
 } from 'datocms-react-ui';
 import { buildClient } from '@datocms/cma-client-browser';
 import * as XLSX from 'xlsx';
-import { AgGridReact } from 'ag-grid-react';
-
-// AG Grid v34 modules (Theming API + editors)
-import {
-  ModuleRegistry,
-  ClientSideRowModelModule,
-  TextEditorModule,
-  themeQuartz,
-} from 'ag-grid-community';
-
-ModuleRegistry.registerModules([
-  ClientSideRowModelModule,
-  TextEditorModule,
-]);
 
 // Dato UI styles
 import 'datocms-react-ui/styles.css';
@@ -177,7 +163,6 @@ function normalizeSheetRowsStrings(rows: TableRow[]): { rows: TableRow[]; column
   return { rows: normalizedRows, columns: safe };
 }
 
-
 // resolve id/apiKey to the correct path (handles locale)
 function getFieldPath(ctx: RenderFieldExtensionCtx, apiKeyOrId: string): string | null {
   const fields = Object.values(ctx.fields) as any[];
@@ -201,7 +186,7 @@ function Alert({ children }: { children: React.ReactNode }) {
         padding: '8px 12px',
         border: '1px solid var(--border-color)',
         borderRadius: 6,
-        marginBottom: 8,
+        marginTop: 8,
       }}
     >
       {children}
@@ -209,35 +194,17 @@ function Alert({ children }: { children: React.ReactNode }) {
   );
 }
 
-// ======= Editor =======
-function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
+// ======= Minimal uploader (no preview/edit) =======
+function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const params = getEditorParams(ctx);
   const preferredApiKey =
     getUrlOverrideApiKey() || params.sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY;
 
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-
-  const [sheet, setSheet] = useState<string | null>(null);
+  const [rows, setRows] = useState<TableRow[]>([]);
+  const [columns, setColumns] = useState<string[]>([]);
   const [sheetNames, setSheetNames] = useState<string[]>([]);
-
-  console.log("Available sheets:", sheetNames);
-
-  const [rows, setRows] = useState<TableRow[]>(() => {
-    const initial = (ctx.formValues as any)[ctx.fieldPath];
-    // Load rows from existing object wrapper if present
-    if (initial && typeof initial === 'object' && !Array.isArray(initial) && (initial as any).rows) {
-      return ((initial as any).rows as TableRow[]) || [];
-    }
-    return Array.isArray(initial) ? (initial as TableRow[]) : [];
-  });
-
-  const columnDefs = useMemo(() => {
-    const cols = new Set<string>();
-    rows.forEach((r) => Object.keys(r as object).forEach((k) => cols.add(k)));
-    if (cols.size === 0) cols.add('column1');
-    return Array.from(cols).map((c) => ({ field: c, editable: true }));
-  }, [rows]);
 
   function getFileFieldValue() {
     const fileFieldId = resolveFieldId(ctx, preferredApiKey);
@@ -266,7 +233,7 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       const fileVal = getFileFieldValue();
       if (!fileVal) {
         setNotice(
-          'No file in the configured file field. Check the "Source File API key" or upload a file (locale-aware).',
+          'No file in the configured file field. Check "Source File API key" or upload a file (locale-aware).',
         );
         return;
       }
@@ -293,15 +260,19 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       const res = await fetch(url);
       const buf = await res.arrayBuffer();
-      const { rows: parsed, sheetNames: names } = toSheetJSRows(buf, sheet || undefined);
+      const { rows: parsed, sheetNames: names } = toSheetJSRows(buf);
 
       const normalized = normalizeSheetRowsStrings(parsed as TableRow[]);
-      setSheetNames(names);
-      setRows(normalized.rows);
-      setSheet(names[0] || null);
 
-      // write ONLY { rows } into the field to satisfy strict JSON validation
-      const payload = toMatrixPayload(normalized.rows as Array<Record<string,string>>, normalized.columns);
+      setRows(normalized.rows);
+      setColumns(normalized.columns);
+      setSheetNames(names);
+
+      // Write JSON payload straight into the field
+      const payload = toMatrixPayload(
+        normalized.rows as Array<Record<string, string>>,
+        normalized.columns,
+      );
       await ctx.setFieldValue(ctx.fieldPath, payload);
 
       // Optional meta fields
@@ -311,6 +282,8 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       if (params.rowCountApiKey) {
         await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(normalized.rows.length));
       }
+
+      ctx.notice('Imported and saved JSON to field.');
     } catch (e: any) {
       setNotice(`Import failed: ${e?.message || e}`);
     } finally {
@@ -318,103 +291,84 @@ function Editor({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     }
   }
 
-  async function saveJson() {
+  async function saveAndPublish() {
     try {
       setBusy(true);
       setNotice(null);
 
-      const normalized = normalizeSheetRowsStrings(rows as TableRow[]);
-      const payload = toMatrixPayload(normalized.rows as Array<Record<string,string>>, normalized.columns);
+      // Ensure field has the latest payload
+      const payload = toMatrixPayload(
+        (rows as Array<Record<string, string>>) ?? [],
+        columns ?? [],
+      );
       await ctx.setFieldValue(ctx.fieldPath, payload);
 
-      if (params.columnsMetaApiKey) {
-        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: normalized.columns });
-      }
-      if (params.rowCountApiKey) {
-        await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(normalized.rows.length));
+      // Try to save the current item via SDK, if exposed
+      if (typeof (ctx as any).saveCurrentItem === 'function') {
+        await (ctx as any).saveCurrentItem();
       }
 
-      ctx.notice('Saved table JSON to field.');
+      // Try to publish via CMA if token provided
+      const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
+      const itemId =
+        (ctx as any).itemId ||
+        (ctx as any).item?.id ||
+        (ctx as any).item?.attributes?.id ||
+        null;
+
+      if (token && itemId) {
+        const client = buildClient({ apiToken: token });
+        await client.items.publish(itemId);
+        ctx.notice('Saved & published!');
+      } else {
+        setNotice(
+          'Saved JSON to the field. To publish the record, click “Publish” in the Dato editor (or add a CMA token with publish permissions).',
+        );
+      }
     } catch (e: any) {
-      setNotice(`Save failed: ${e?.message || e}`);
+      setNotice(`Save/Publish failed: ${e?.message || e}`);
     } finally {
       setBusy(false);
     }
   }
 
-  // Inline edits: update state and immediately push normalized { rows } to the form
-  const handleCellValueChanged = (e: any) => {
-    const { rowIndex, colDef, newValue } = e;
-    const key = colDef.field as string;
-
-    setRows(prev => {
-      const next = [...prev];
-      const row = { ...(next[rowIndex] || {}) } as Record<string, unknown>;
-      row[key] = toStringValue(newValue);
-      next[rowIndex] = row;
-
-      const normalized = normalizeSheetRowsStrings(next as TableRow[]);
-      void ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
-
-      return next;
-    });
-  };
-
-  function addRow() {
-    setRows(prev => {
-      const next = [...prev, {}];
-      const normalized = normalizeSheetRowsStrings(next as TableRow[]);
-      void ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
-      return next;
-    });
-  }
-  function addColumn() {
-    const newKey = `column_${Date.now().toString().slice(-4)}`;
-    setRows(prev => {
-      const next = prev.map(r => ({ ...r, [newKey]: (r as any)[newKey] ?? '' }));
-      const normalized = normalizeSheetRowsStrings(next as TableRow[]);
-      void ctx.setFieldValue(ctx.fieldPath, { rows: normalized.rows });
-      return next;
-    });
-  }
-
-  // If external changes write back to this field, reflect them
+  // If something else wrote to this field, keep local state in sync (optional)
   useEffect(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
-    if (initial && typeof initial === 'object' && !Array.isArray(initial) && (initial as any).rows) {
-      setRows(((initial as any).rows as TableRow[]) || []);
-    } else if (Array.isArray(initial)) {
-      setRows(initial as TableRow[]);
+    if (typeof initial === 'string') {
+      try {
+        const parsed = JSON.parse(initial);
+        if (parsed?.columns && parsed?.data) {
+          setColumns(parsed.columns);
+          const asRows: TableRow[] = parsed.data.map((arr: string[]) =>
+            Object.fromEntries(parsed.columns.map((c: string, i: number) => [c, arr[i] ?? ''])),
+          );
+          setRows(asRows);
+        }
+      } catch {
+        // ignore invalid JSON
+      }
     }
   }, [ctx.fieldPath, ctx.formValues]);
 
   return (
     <Canvas ctx={ctx}>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <Button onClick={importFromSource} disabled={busy} buttonType="primary">
-          Import from source file
+          Import from Excel file
         </Button>
-        <Button onClick={saveJson} disabled={busy} buttonType="primary">
-          Save JSON to field
-        </Button>
-        <Button onClick={addRow} disabled={busy} buttonType="muted" buttonSize="s">
-          + Row
-        </Button>
-        <Button onClick={addColumn} disabled={busy} buttonType="muted" buttonSize="s">
-          + Column
+        <Button onClick={saveAndPublish} disabled={busy} buttonType="primary">
+          Save & Publish
         </Button>
       </div>
 
       {busy && <Spinner />}
 
-      <div style={{ height: 420, width: '100%' }}>
-        <AgGridReact
-          theme={themeQuartz}
-          rowData={rows as any[]}
-          columnDefs={columnDefs as any}
-          onCellValueChanged={handleCellValueChanged}
-        />
-      </div>
+      {sheetNames.length > 0 && (
+        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
+          Imported sheets detected: {sheetNames.join(', ')} (first sheet used)
+        </div>
+      )}
 
       {notice && <Alert>{notice}</Alert>}
     </Canvas>
@@ -431,7 +385,7 @@ function Config({ ctx }: { ctx: any }) {
       <TextField
         id="cmaToken"
         name="cmaToken"
-        label="CMA API Token (Uploads: Read)"
+        label="CMA API Token (Uploads: Read; Items: Write + Publish for Save & Publish)"
         value={token}
         onChange={setToken}
       />
@@ -459,8 +413,8 @@ connect({
   manualFieldExtensions() {
     return [
       {
-        id: 'excelJsonEditor',
-        name: 'Excel → Editable JSON Table',
+        id: 'excelJsonUploader',
+        name: 'Excel → JSON (Upload & Publish)',
         type: 'editor',
         fieldTypes: ['json'],
         parameters: [
@@ -473,25 +427,10 @@ connect({
   },
 
   renderFieldExtension(id, ctx) {
-    if (id === 'excelJsonEditor') {
-      ReactDOM.createRoot(document.getElementById('root')!).render(<Editor ctx={ctx} />);
+    if (id === 'excelJsonUploader') {
+      ReactDOM.createRoot(document.getElementById('root')!).render(<Uploader ctx={ctx} />);
     }
   },
 });
 
-// Optional: dev harness if opened directly (not inside Dato)
-if (window.self === window.top) {
-  ReactDOM.createRoot(document.getElementById('root')!).render(
-    <div style={{ padding: 16 }}>
-      <h3>Plugin dev harness</h3>
-      <p>
-        Embed this in Dato as a Private Plugin and attach it as the Field editor for your
-        <code> dataJson</code> field (Presentation tab).
-      </p>
-      <p>
-        You can override the file field via URL:
-        <code>?fileApiKey=another_file_field</code>
-      </p>
-    </div>,
-  );
-}
+// Optional: dev harness if opened directly (not inside
