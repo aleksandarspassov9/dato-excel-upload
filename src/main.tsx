@@ -28,12 +28,6 @@ type FieldParams = {
   rowCountApiKey?: string;
 };
 
-const EXCEL_MIME_WHITELIST = new Set<string>([
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
-  'application/vnd.ms-excel', // legacy .xls
-  'text/csv',
-  'application/csv',
-]);
 const IMAGE_MIME_PREFIX = 'image/';
 
 // ======= Helpers =======
