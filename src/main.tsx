@@ -1,5 +1,5 @@
 // src/main.tsx
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import {
   connect,
@@ -14,11 +14,10 @@ import {
 import { buildClient } from '@datocms/cma-client-browser';
 import * as XLSX from 'xlsx';
 
-// Dato UI styles
 import 'datocms-react-ui/styles.css';
 
 // ======= Config / fallbacks =======
-const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile'; // change if you prefer another default
+const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile'; // change to your usual file field key
 
 type TableRow = Record<string, unknown>;
 
@@ -77,13 +76,11 @@ function resolveFieldId(
     );
     if (match?.id) return match.id;
   }
-  return null; // no auto-fallback; we only use the configured field
+  return null;
 }
 
 function pickAnyLocaleValue(raw: any, locale?: string | null) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw ?? null;
-
-  // Prefer current locale, else first non-empty locale value
   if (locale && Object.prototype.hasOwnProperty.call(raw, locale) && raw[locale]) {
     return raw[locale];
   }
@@ -93,12 +90,26 @@ function pickAnyLocaleValue(raw: any, locale?: string | null) {
   return null;
 }
 
+function getFieldPath(ctx: RenderFieldExtensionCtx, apiKeyOrId: string): string | null {
+  const fields = Object.values(ctx.fields) as any[];
+  const byId = (ctx.fields as any)[apiKeyOrId];
+  const id =
+    byId?.id ?? (fields.find(f => (f.apiKey ?? f.attributes?.api_key) === apiKeyOrId)?.id);
+  if (!id) return null;
+  return ctx.locale ? `${id}.${ctx.locale}` : id;
+}
+
+async function setFieldByApiOrId(ctx: RenderFieldExtensionCtx, apiKeyOrId: string, value: unknown) {
+  const path = getFieldPath(ctx, apiKeyOrId);
+  if (path) await ctx.setFieldValue(path, value);
+}
+
 async function fetchUploadMeta(
   fileFieldValue: any,
   cmaToken: string,
 ): Promise<{ url: string; mime_type: string | null; filename: string | null } | null> {
   if (fileFieldValue?.upload_id) {
-    if (!cmaToken) return null; // cannot resolve without token
+    if (!cmaToken) return null;
     const client = buildClient({ apiToken: cmaToken });
     const upload: any = await client.uploads.find(String(fileFieldValue.upload_id));
     return {
@@ -128,7 +139,6 @@ function toStringValue(v: unknown): string {
   return String(v);
 }
 
-/** Normalize to safe column names and **string** cell values */
 function normalizeSheetRowsStrings(rows: TableRow[]): { rows: TableRow[]; columns: string[] } {
   if (!rows || rows.length === 0) return { rows: [], columns: [] };
 
@@ -148,31 +158,13 @@ function normalizeSheetRowsStrings(rows: TableRow[]): { rows: TableRow[]; column
   return { rows: normalizedRows, columns: safe };
 }
 
-function getFieldPath(ctx: RenderFieldExtensionCtx, apiKeyOrId: string): string | null {
-  const fields = Object.values(ctx.fields) as any[];
-  const byId = (ctx.fields as any)[apiKeyOrId];
-  const id =
-    byId?.id ?? (fields.find(f => (f.apiKey ?? f.attributes?.api_key) === apiKeyOrId)?.id);
-  if (!id) return null;
-  return ctx.locale ? `${id}.${ctx.locale}` : id;
-}
-
-async function setFieldByApiOrId(ctx: RenderFieldExtensionCtx, apiKeyOrId: string, value: unknown) {
-  const path = getFieldPath(ctx, apiKeyOrId);
-  if (path) await ctx.setFieldValue(path, value);
-}
-
 function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
   return (ctx.field as any)?.attributes?.field_type === 'json';
 }
 
-/** Writes RAW JSON correctly depending on the field type:
- *  - JSON field → object
- *  - Text field (or other) → stringified JSON
- */
 async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
   const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
-  await ctx.setFieldValue(ctx.fieldPath, null); // clear first to guarantee a diff
+  await ctx.setFieldValue(ctx.fieldPath, null);
   await Promise.resolve();
   await ctx.setFieldValue(ctx.fieldPath, value);
 }
@@ -193,7 +185,7 @@ function Alert({ children }: { children: React.ReactNode }) {
   );
 }
 
-// ======= Minimal uploader (no preview/edit) =======
+// ======= Minimal uploader (w/ detection UI) =======
 function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const params = getEditorParams(ctx);
   const preferredApiKey =
@@ -206,46 +198,65 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const [sheetNames, setSheetNames] = useState<string[]>([]);
   const [selectedMeta, setSelectedMeta] = useState<{ filename: string | null, mime: string | null } | null>(null);
 
-  function getFileFieldValueStrict() {
-    const fileFieldId = resolveFieldId(ctx, preferredApiKey);
+  // Derived: which file fields have a value right now?
+  const detectedFileFields = useMemo(() => {
+    const candidates = listFileFields(ctx);
+    return candidates.map((f) => {
+      const raw = (ctx.formValues as any)[f.id];
+      const val = pickAnyLocaleValue(raw, ctx.locale);
+      // normalize shape for UI
+      let hasValue = false;
+      let preview = '';
+      if (val) {
+        hasValue = true;
+        if (Array.isArray(val) && val.length > 0) {
+          preview = val[0]?.upload_id ?? val[0]?.upload?.id ?? (typeof val[0] === 'string' ? val[0] : '');
+        } else if (val?.upload_id || val?.upload?.id) {
+          preview = val.upload_id ?? val.upload?.id;
+        } else if (typeof val === 'string') {
+          preview = val;
+        } else {
+          preview = '[object]';
+        }
+      }
+      return { ...f, hasValue, preview };
+    });
+  }, [ctx.fields, ctx.formValues, ctx.locale]);
 
-    if (!fileFieldId) {
-      const candidates = listFileFields(ctx);
-      setNotice(
-        `Configured Source File API key "${preferredApiKey}" not found on this model. ` +
-        (candidates.length
-          ? `Available file fields: ${candidates.map(c => c.apiKey).join(', ')}. ` +
-            `Set the "Source File API key" in the editor parameters (Presentation tab) to one of these.`
-          : 'This model has no file fields. Add one, or adjust your configuration.'),
-      );
-      return null;
-    }
+  function getFileFieldValueFrom(apiKey: string | null) {
+    if (!apiKey) return null;
+    const fileFieldId = resolveFieldId(ctx, apiKey);
+    if (!fileFieldId) return null;
 
     let raw = (ctx.formValues as any)[fileFieldId];
     raw = pickAnyLocaleValue(raw, ctx.locale);
     if (!raw) return null;
 
     if (Array.isArray(raw)) raw = raw[0];
-
     if (raw?.upload_id) return raw;
     if (raw?.upload?.id) return { upload_id: raw.upload.id };
     if (typeof raw === 'string' && raw.startsWith('http')) return { __direct_url: raw };
     return null;
   }
 
-  async function importFromSource() {
+  async function importFromSource(overrideApiKey?: string) {
     try {
       setBusy(true);
       setNotice(null);
 
-      console.log('[excelJsonUploader] using fileApiKey', preferredApiKey, 'locale', ctx.locale);
+      const effectiveApiKey = overrideApiKey ?? preferredApiKey;
+      console.log('[excelJsonUploader] using fileApiKey', effectiveApiKey, 'locale', ctx.locale);
 
-      // 1) read ONLY from the configured file field (no global fallback)
-      const fileVal = getFileFieldValueStrict();
+      // 1) read value from selected/configured file field only
+      const fileVal = getFileFieldValueFrom(effectiveApiKey);
       if (!fileVal) {
-        if (!notice) {
-          setNotice(`No file found in the configured field: "${preferredApiKey}". Upload a spreadsheet there and try again.`);
-        }
+        const msgBase = `No file found in the field "${effectiveApiKey}".`;
+        const extras = detectedFileFields.length
+          ? ` Detected file fields: ${detectedFileFields
+              .map(f => `${f.apiKey}${f.hasValue ? ' (has value)' : ''}`)
+              .join(', ')}.`
+          : ' No file fields detected on this model.';
+        setNotice(msgBase + extras + ' Make sure you uploaded your spreadsheet to that exact field (and locale).');
         return;
       }
 
@@ -253,55 +264,46 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
       const meta = await fetchUploadMeta(fileVal, token);
       if (!meta?.url) {
-        setNotice('Could not resolve upload URL from the file field value. Add a CMA token with "Uploads: read" in the plugin config, or supply a direct URL.');
+        setNotice('Could not resolve upload URL from the file field value. Add a CMA token with "Uploads: read" in the plugin config, or use a direct URL value.');
         return;
       }
       setSelectedMeta({ filename: meta.filename, mime: meta.mime_type });
 
       // 3) quick guard: obvious wrong mime types (images)
       if (meta.mime_type && meta.mime_type.startsWith(IMAGE_MIME_PREFIX)) {
-        setNotice(`The selected file appears to be an image (${meta.mime_type}${meta.filename ? `, ${meta.filename}` : ''}). Please choose an Excel/CSV file in "${preferredApiKey}".`);
+        setNotice(`The selected file appears to be an image (${meta.mime_type}${meta.filename ? `, ${meta.filename}` : ''}). Please choose an Excel/CSV file.`);
         return;
       }
 
-      // 4) fetch with hard cache-busting
+      // 4) fetch with cache-busting
       const bust = Date.now();
       const url = meta.url + (meta.url.includes('?') ? '&' : '?') + `cb=${bust}`;
       const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
 
-      // 5) choose parser by Content-Type (fallback to XLSX array)
+      // 5) parse by Content-Type (fallback to XLSX)
       const ct = res.headers.get('content-type') || meta.mime_type || '';
       let rowsParsed: TableRow[] = [];
-      let sheetList: string[] = [];
+      let names: string[] = [];
 
       if (ct.includes('csv')) {
         const text = await res.text();
         const wb = XLSX.read(text, { type: 'string' });
-        const names = wb.SheetNames;
+        names = wb.SheetNames;
         const ws = wb.Sheets[names[0]];
         rowsParsed = XLSX.utils.sheet_to_json(ws, { defval: null }) as TableRow[];
-        sheetList = names;
       } else {
-        // assume XLSX/XLS or similar
         const buf = await res.arrayBuffer();
-        try {
-          const wb = XLSX.read(buf, { type: 'array' });
-          const names = wb.SheetNames;
-          const ws = wb.Sheets[names[0]];
-          rowsParsed = XLSX.utils.sheet_to_json(ws, { defval: null }) as TableRow[];
-          sheetList = names;
-        } catch (err: any) {
-          throw new Error(
-            `${err?.message || err}. Make sure the configured field "${preferredApiKey}" contains an Excel/CSV file, not an image or unrelated asset.`,
-          );
-        }
+        const wb = XLSX.read(buf, { type: 'array' });
+        names = wb.SheetNames;
+        const ws = wb.Sheets[names[0]];
+        rowsParsed = XLSX.utils.sheet_to_json(ws, { defval: null }) as TableRow[];
       }
 
       const normalized = normalizeSheetRowsStrings(rowsParsed);
       setRows(normalized.rows);
       setColumns(normalized.columns);
-      setSheetNames(sheetList);
+      setSheetNames(names);
 
       const payloadObj = {
         columns: normalized.columns,
@@ -313,6 +315,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
           mime_type: meta.mime_type ?? null,
           imported_at: new Date().toISOString(),
           nonce: bust,
+          source_field_api_key: effectiveApiKey,
         },
       };
 
@@ -326,7 +329,6 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
         await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(normalized.rows.length));
       }
 
-      // Persist immediately if possible
       if (typeof (ctx as any).saveCurrentItem === 'function') {
         await (ctx as any).saveCurrentItem();
       }
@@ -394,10 +396,12 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     }
   }, [ctx.fieldPath, ctx.formValues]);
 
+  const configuredFieldExists = !!resolveFieldId(ctx, preferredApiKey);
+
   return (
     <Canvas ctx={ctx}>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <Button onClick={importFromSource} disabled={busy} buttonType="primary">
+        <Button onClick={() => importFromSource()} disabled={busy} buttonType="primary">
           Import from Excel/CSV
         </Button>
         <Button onClick={saveAndPublish} disabled={busy} buttonType="primary">
@@ -418,12 +422,37 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       {busy && <Spinner />}
 
-      {selectedMeta && (
-        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
-          Selected: {selectedMeta.filename || 'unknown filename'}
-          {selectedMeta.mime ? ` • ${selectedMeta.mime}` : ''}
+      {/* Debug/assist panel for picking the right file field */}
+      <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
+        <div>
+          Configured file field API key: <code>{preferredApiKey}</code>{' '}
+          {!configuredFieldExists && <strong>(not found on this model)</strong>}
         </div>
-      )}
+        <div>Current locale: <code>{String(ctx.locale || 'default')}</code></div>
+        {detectedFileFields.length > 0 && (
+          <div style={{ marginTop: 6 }}>
+            Detected file fields on this model:
+            <ul style={{ margin: '6px 0 0 16px' }}>
+              {detectedFileFields.map(f => (
+                <li key={f.id}>
+                  <code>{f.apiKey}</code> — {f.hasValue ? 'has value ✓' : 'empty'}{f.preview ? ` (preview: ${String(f.preview).slice(0, 40)}…)` : ''}
+                  {f.hasValue && (
+                    <Button
+                      buttonSize="xs"
+                      buttonType="muted"
+                      style={{ marginLeft: 8 }}
+                      onClick={() => importFromSource(f.apiKey)}
+                      disabled={busy}
+                    >
+                      Import from this field
+                    </Button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
 
       {sheetNames.length > 0 && (
         <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
@@ -477,7 +506,7 @@ connect({
         id: 'excelJsonUploader',
         name: 'Excel → JSON (Upload & Publish)',
         type: 'editor',
-        fieldTypes: ['json', 'text'], // attach to JSON or Text fields
+        fieldTypes: ['json', 'text'],
         parameters: [
           { id: 'sourceFileApiKey', name: 'Source File API key', type: 'string', required: true },
           { id: 'columnsMetaApiKey', name: 'Columns Meta API key', type: 'string' },
@@ -500,11 +529,10 @@ if (window.self === window.top) {
     <div style={{ padding: 16 }}>
       <h3>Plugin dev harness</h3>
       <p>
-        Embed this in Dato as a Private Plugin and attach it as the Field editor for your
-        <code> dataJson</code> (JSON or Text) field (Presentation tab).
+        Attach this as the Field editor for your <code>dataJson</code> (JSON or Text) field.
       </p>
       <p>
-        Configure the correct file field via the "Source File API key" parameter (or add <code>?fileApiKey=…</code> to the URL).
+        Configure the correct file field via the "Source File API key" parameter (or add <code>?fileApiKey=…</code>).
       </p>
     </div>,
   );
