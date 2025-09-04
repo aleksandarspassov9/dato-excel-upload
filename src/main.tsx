@@ -204,7 +204,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [rows, setRows] = useState<TableRow[]>([]);
   const [columns, setColumns] = useState<string[]>([]);
-  const [sheetNames, setSheetNames] = useState<string[]>([]);
+  const [sheetNames] = useState<string[]>([]);
 
   function getFileFieldValue() {
     const fileFieldId = resolveFieldId(ctx, preferredApiKey);
