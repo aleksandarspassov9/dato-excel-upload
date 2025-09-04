@@ -18,7 +18,7 @@ import * as XLSX from 'xlsx';
 import 'datocms-react-ui/styles.css';
 
 // ======= Config / fallbacks =======
-const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile'; // your file field API key
+const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile'; // change if you prefer another default
 
 type TableRow = Record<string, unknown>;
 
@@ -51,33 +51,46 @@ function getEditorParams(ctx: RenderFieldExtensionCtx): FieldParams {
   return appearance;
 }
 
+function listFileFields(ctx: RenderFieldExtensionCtx) {
+  const fields = Object.values(ctx.fields) as any[];
+  return fields
+    .filter((f) => (f.fieldType ?? f.attributes?.field_type) === 'file')
+    .map((f) => ({
+      id: f.id,
+      apiKey: f.apiKey ?? f.attributes?.api_key,
+      label: f.label ?? f.attributes?.label,
+    }));
+}
+
 function resolveFieldId(
   ctx: RenderFieldExtensionCtx,
   preferred?: string | null,
 ): string | null {
-  const fields = Object.values(ctx.fields) as any[];
+  const fieldsArr = Object.values(ctx.fields) as any[];
 
   if (preferred) {
     const byId = (ctx.fields as any)[preferred];
     if (byId?.id) return byId.id;
 
-    const match = fields.find((f) => (f.apiKey ?? f.attributes?.api_key) === preferred);
-    if (match) return match.id;
+    const match = fieldsArr.find(
+      (f) => (f.apiKey ?? f.attributes?.api_key) === preferred,
+    );
+    if (match?.id) return match.id;
   }
-  return null;
+  return null; // no auto-fallback; we only use the configured field
 }
 
-function pickLocalizedValue(raw: any, locale?: string | null) {
-  if (
-    raw &&
-    typeof raw === 'object' &&
-    raw !== null &&
-    locale &&
-    Object.prototype.hasOwnProperty.call(raw, locale)
-  ) {
+function pickAnyLocaleValue(raw: any, locale?: string | null) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw ?? null;
+
+  // Prefer current locale, else first non-empty locale value
+  if (locale && Object.prototype.hasOwnProperty.call(raw, locale) && raw[locale]) {
     return raw[locale];
   }
-  return raw ?? null;
+  for (const k of Object.keys(raw)) {
+    if (raw[k]) return raw[k];
+  }
+  return null;
 }
 
 async function fetchUploadMeta(
@@ -85,6 +98,7 @@ async function fetchUploadMeta(
   cmaToken: string,
 ): Promise<{ url: string; mime_type: string | null; filename: string | null } | null> {
   if (fileFieldValue?.upload_id) {
+    if (!cmaToken) return null; // cannot resolve without token
     const client = buildClient({ apiToken: cmaToken });
     const upload: any = await client.uploads.find(String(fileFieldValue.upload_id));
     return {
@@ -94,7 +108,6 @@ async function fetchUploadMeta(
     };
   }
   if (fileFieldValue?.__direct_url) {
-    // Best-effort for direct URLs (no mime available before fetch)
     const url: string = fileFieldValue.__direct_url;
     const filename = (() => {
       try {
@@ -135,7 +148,6 @@ function normalizeSheetRowsStrings(rows: TableRow[]): { rows: TableRow[]; column
   return { rows: normalizedRows, columns: safe };
 }
 
-// resolve id/apiKey to the correct path (handles locale)
 function getFieldPath(ctx: RenderFieldExtensionCtx, apiKeyOrId: string): string | null {
   const fields = Object.values(ctx.fields) as any[];
   const byId = (ctx.fields as any)[apiKeyOrId];
@@ -160,7 +172,7 @@ function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
  */
 async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
   const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
-  await ctx.setFieldValue(ctx.fieldPath, null);
+  await ctx.setFieldValue(ctx.fieldPath, null); // clear first to guarantee a diff
   await Promise.resolve();
   await ctx.setFieldValue(ctx.fieldPath, value);
 }
@@ -196,12 +208,23 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
   function getFileFieldValueStrict() {
     const fileFieldId = resolveFieldId(ctx, preferredApiKey);
-    if (!fileFieldId) return null;
+
+    if (!fileFieldId) {
+      const candidates = listFileFields(ctx);
+      setNotice(
+        `Configured Source File API key "${preferredApiKey}" not found on this model. ` +
+        (candidates.length
+          ? `Available file fields: ${candidates.map(c => c.apiKey).join(', ')}. ` +
+            `Set the "Source File API key" in the editor parameters (Presentation tab) to one of these.`
+          : 'This model has no file fields. Add one, or adjust your configuration.'),
+      );
+      return null;
+    }
 
     let raw = (ctx.formValues as any)[fileFieldId];
-    raw = pickLocalizedValue(raw, ctx.locale);
-
+    raw = pickAnyLocaleValue(raw, ctx.locale);
     if (!raw) return null;
+
     if (Array.isArray(raw)) raw = raw[0];
 
     if (raw?.upload_id) return raw;
@@ -215,10 +238,14 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setBusy(true);
       setNotice(null);
 
+      console.log('[excelJsonUploader] using fileApiKey', preferredApiKey, 'locale', ctx.locale);
+
       // 1) read ONLY from the configured file field (no global fallback)
       const fileVal = getFileFieldValueStrict();
       if (!fileVal) {
-        setNotice(`No file found in the configured field: "${preferredApiKey}". Check the plugin param or upload a spreadsheet there.`);
+        if (!notice) {
+          setNotice(`No file found in the configured field: "${preferredApiKey}". Upload a spreadsheet there and try again.`);
+        }
         return;
       }
 
@@ -226,7 +253,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
       const meta = await fetchUploadMeta(fileVal, token);
       if (!meta?.url) {
-        setNotice('Could not resolve upload URL from the file field value.');
+        setNotice('Could not resolve upload URL from the file field value. Add a CMA token with "Uploads: read" in the plugin config, or supply a direct URL.');
         return;
       }
       setSelectedMeta({ filename: meta.filename, mime: meta.mime_type });
@@ -265,10 +292,8 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
           rowsParsed = XLSX.utils.sheet_to_json(ws, { defval: null }) as TableRow[];
           sheetList = names;
         } catch (err: any) {
-          // Common SheetJS message when the buffer is a PNG:
-          // "PNG Image File is not a spreadsheet"
           throw new Error(
-            `${err?.message || err}. Make sure the configured field "${preferredApiKey}" contains an Excel/CSV file, not an image.`,
+            `${err?.message || err}. Make sure the configured field "${preferredApiKey}" contains an Excel/CSV file, not an image or unrelated asset.`,
           );
         }
       }
@@ -452,7 +477,7 @@ connect({
         id: 'excelJsonUploader',
         name: 'Excel → JSON (Upload & Publish)',
         type: 'editor',
-        fieldTypes: ['json', 'text'], // allow attaching to JSON or Text fields
+        fieldTypes: ['json', 'text'], // attach to JSON or Text fields
         parameters: [
           { id: 'sourceFileApiKey', name: 'Source File API key', type: 'string', required: true },
           { id: 'columnsMetaApiKey', name: 'Columns Meta API key', type: 'string' },
@@ -479,7 +504,7 @@ if (window.self === window.top) {
         <code> dataJson</code> (JSON or Text) field (Presentation tab).
       </p>
       <p>
-        You must configure the correct file field via the "Source File API key" parameter.
+        Configure the correct file field via the "Source File API key" parameter (or add <code>?fileApiKey=…</code> to the URL).
       </p>
     </div>,
   );
