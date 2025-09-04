@@ -28,6 +28,14 @@ type FieldParams = {
   rowCountApiKey?: string;
 };
 
+const EXCEL_MIME_WHITELIST = new Set<string>([
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+  'application/vnd.ms-excel', // legacy .xls
+  'text/csv',
+  'application/csv',
+]);
+const IMAGE_MIME_PREFIX = 'image/';
+
 // ======= Helpers =======
 function getUrlOverrideApiKey(): string | undefined {
   try {
@@ -62,11 +70,7 @@ function resolveFieldId(
     const match = fields.find((f) => (f.apiKey ?? f.attributes?.api_key) === preferred);
     if (match) return match.id;
   }
-
-  const firstFile = fields.find(
-    (f) => (f.fieldType ?? f.attributes?.field_type) === 'file',
-  );
-  return firstFile?.id ?? null;
+  return null;
 }
 
 function pickLocalizedValue(raw: any, locale?: string | null) {
@@ -82,48 +86,31 @@ function pickLocalizedValue(raw: any, locale?: string | null) {
   return raw ?? null;
 }
 
-async function fetchUploadUrlFromValue(
+async function fetchUploadMeta(
   fileFieldValue: any,
   cmaToken: string,
-): Promise<string | null> {
-  const uploadId = fileFieldValue?.upload_id;
-  if (!uploadId) return null;
-  const client = buildClient({ apiToken: cmaToken });
-  const upload = await client.uploads.find(String(uploadId));
-  return (upload as any)?.url || null;
-}
-
-function toSheetJSRows(
-  binary: ArrayBuffer,
-): { rows: TableRow[]; sheetNames: string[] } {
-  const wb = XLSX.read(binary, { type: 'array' });
-  const names = wb.SheetNames;
-  const ws = wb.Sheets[names[0]];
-  const rows = XLSX.utils.sheet_to_json(ws, { defval: null }) as TableRow[];
-  return { rows, sheetNames: names };
-}
-
-function findFirstUploadInObject(obj: any, locale?: string | null): any | null {
-  if (!obj || typeof obj !== 'object') return null;
-
-  const localized = pickLocalizedValue(obj, locale);
-  const cur = localized ?? obj;
-
-  if (Array.isArray(cur)) {
-    for (const item of cur) {
-      const hit = findFirstUploadInObject(item, locale);
-      if (hit) return hit;
-    }
-    return null;
+): Promise<{ url: string; mime_type: string | null; filename: string | null } | null> {
+  if (fileFieldValue?.upload_id) {
+    const client = buildClient({ apiToken: cmaToken });
+    const upload: any = await client.uploads.find(String(fileFieldValue.upload_id));
+    return {
+      url: upload?.url || null,
+      mime_type: upload?.mime_type ?? null,
+      filename: upload?.filename ?? null,
+    };
   }
-
-  if (cur?.upload_id || cur?.upload?.id || (typeof cur === 'string' && cur.startsWith('http'))) {
-    return cur;
-  }
-
-  for (const key of Object.keys(cur)) {
-    const hit = findFirstUploadInObject(cur[key], locale);
-    if (hit) return hit;
+  if (fileFieldValue?.__direct_url) {
+    // Best-effort for direct URLs (no mime available before fetch)
+    const url: string = fileFieldValue.__direct_url;
+    const filename = (() => {
+      try {
+        const u = new URL(url);
+        return decodeURIComponent(u.pathname.split('/').pop() || '');
+      } catch {
+        return null;
+      }
+    })();
+    return { url, mime_type: null, filename };
   }
   return null;
 }
@@ -178,13 +165,10 @@ function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
  *  - Text field (or other) → stringified JSON
  */
 async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
-  // const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
-  console.log(JSON.stringify(payloadObj), 'value')
-
-  // Clear first to guarantee a diff, then write
+  const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
   await ctx.setFieldValue(ctx.fieldPath, null);
   await Promise.resolve();
-  await ctx.setFieldValue(ctx.fieldPath, JSON.stringify(payloadObj));
+  await ctx.setFieldValue(ctx.fieldPath, value);
 }
 
 function Alert({ children }: { children: React.ReactNode }) {
@@ -214,18 +198,16 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const [rows, setRows] = useState<TableRow[]>([]);
   const [columns, setColumns] = useState<string[]>([]);
   const [sheetNames, setSheetNames] = useState<string[]>([]);
+  const [selectedMeta, setSelectedMeta] = useState<{ filename: string | null, mime: string | null } | null>(null);
 
-  function getFileFieldValue() {
+  function getFileFieldValueStrict() {
     const fileFieldId = resolveFieldId(ctx, preferredApiKey);
-    let raw = fileFieldId ? (ctx.formValues as any)[fileFieldId] : undefined;
+    if (!fileFieldId) return null;
 
+    let raw = (ctx.formValues as any)[fileFieldId];
     raw = pickLocalizedValue(raw, ctx.locale);
-    if (!raw) {
-      const found = findFirstUploadInObject(ctx.formValues, ctx.locale);
-      raw = found || null;
-    }
-    if (!raw) return null;
 
+    if (!raw) return null;
     if (Array.isArray(raw)) raw = raw[0];
 
     if (raw?.upload_id) return raw;
@@ -239,48 +221,80 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setBusy(true);
       setNotice(null);
 
-      const fileVal = getFileFieldValue();
+      // 1) read ONLY from the configured file field (no global fallback)
+      const fileVal = getFileFieldValueStrict();
       if (!fileVal) {
-        setNotice('No file in the configured file field. Upload one and try again.');
+        setNotice(`No file found in the configured field: "${preferredApiKey}". Check the plugin param or upload a spreadsheet there.`);
         return;
       }
 
+      // 2) resolve URL + mime using CMA when possible
       const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
-      let url: string | null = null;
-
-      if ((fileVal as any).__direct_url) {
-        url = (fileVal as any).__direct_url as string;
-      } else {
-        if (!token) {
-          setNotice('Missing CMA token in plugin configuration (Uploads: read).');
-          return;
-        }
-        url = await fetchUploadUrlFromValue(fileVal, token);
-      }
-      if (!url) {
+      const meta = await fetchUploadMeta(fileVal, token);
+      if (!meta?.url) {
         setNotice('Could not resolve upload URL from the file field value.');
         return;
       }
+      setSelectedMeta({ filename: meta.filename, mime: meta.mime_type });
 
-      // Cache-bust to avoid stale Excel downloads
+      // 3) quick guard: obvious wrong mime types (images)
+      if (meta.mime_type && meta.mime_type.startsWith(IMAGE_MIME_PREFIX)) {
+        setNotice(`The selected file appears to be an image (${meta.mime_type}${meta.filename ? `, ${meta.filename}` : ''}). Please choose an Excel/CSV file in "${preferredApiKey}".`);
+        return;
+      }
+
+      // 4) fetch with hard cache-busting
       const bust = Date.now();
-      const res = await fetch(url + (url.includes('?') ? '&' : '?') + `cb=${bust}`, { cache: 'no-store' });
+      const url = meta.url + (meta.url.includes('?') ? '&' : '?') + `cb=${bust}`;
+      const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
-      const buf = await res.arrayBuffer();
 
-      const { rows: parsed, sheetNames: names } = toSheetJSRows(buf);
-      const normalized = normalizeSheetRowsStrings(parsed as TableRow[]);
+      // 5) choose parser by Content-Type (fallback to XLSX array)
+      const ct = res.headers.get('content-type') || meta.mime_type || '';
+      let rowsParsed: TableRow[] = [];
+      let sheetList: string[] = [];
 
+      if (ct.includes('csv')) {
+        const text = await res.text();
+        const wb = XLSX.read(text, { type: 'string' });
+        const names = wb.SheetNames;
+        const ws = wb.Sheets[names[0]];
+        rowsParsed = XLSX.utils.sheet_to_json(ws, { defval: null }) as TableRow[];
+        sheetList = names;
+      } else {
+        // assume XLSX/XLS or similar
+        const buf = await res.arrayBuffer();
+        try {
+          const wb = XLSX.read(buf, { type: 'array' });
+          const names = wb.SheetNames;
+          const ws = wb.Sheets[names[0]];
+          rowsParsed = XLSX.utils.sheet_to_json(ws, { defval: null }) as TableRow[];
+          sheetList = names;
+        } catch (err: any) {
+          // Common SheetJS message when the buffer is a PNG:
+          // "PNG Image File is not a spreadsheet"
+          throw new Error(
+            `${err?.message || err}. Make sure the configured field "${preferredApiKey}" contains an Excel/CSV file, not an image.`,
+          );
+        }
+      }
+
+      const normalized = normalizeSheetRowsStrings(rowsParsed);
       setRows(normalized.rows);
       setColumns(normalized.columns);
-      setSheetNames(names);
+      setSheetNames(sheetList);
 
       const payloadObj = {
         columns: normalized.columns,
         data: normalized.rows.map(r =>
           normalized.columns.map(c => (r as any)[c] ?? '')
         ),
-        meta: { nonce: bust }, // ensures value changes even if content is identical
+        meta: {
+          filename: meta.filename ?? null,
+          mime_type: meta.mime_type ?? null,
+          imported_at: new Date().toISOString(),
+          nonce: bust,
+        },
       };
 
       await writePayload(ctx, payloadObj);
@@ -314,7 +328,11 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       const payloadObj = {
         columns,
         data: (rows as Array<Record<string, string>>).map(r => columns.map(c => r[c] ?? '')),
-        meta: { nonce: Date.now() },
+        meta: {
+          ...(selectedMeta || {}),
+          saved_at: new Date().toISOString(),
+          nonce: Date.now(),
+        },
       };
 
       await writePayload(ctx, payloadObj);
@@ -361,7 +379,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     <Canvas ctx={ctx}>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <Button onClick={importFromSource} disabled={busy} buttonType="primary">
-          Import from Excel file
+          Import from Excel/CSV
         </Button>
         <Button onClick={saveAndPublish} disabled={busy} buttonType="primary">
           Save & Publish
@@ -380,6 +398,13 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       </div>
 
       {busy && <Spinner />}
+
+      {selectedMeta && (
+        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
+          Selected: {selectedMeta.filename || 'unknown filename'}
+          {selectedMeta.mime ? ` • ${selectedMeta.mime}` : ''}
+        </div>
+      )}
 
       {sheetNames.length > 0 && (
         <div style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
@@ -460,8 +485,7 @@ if (window.self === window.top) {
         <code> dataJson</code> (JSON or Text) field (Presentation tab).
       </p>
       <p>
-        You can override the file field via URL:
-        <code>?fileApiKey=another_file_field</code>
+        You must configure the correct file field via the "Source File API key" parameter.
       </p>
     </div>,
   );
