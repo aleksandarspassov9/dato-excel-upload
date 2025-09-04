@@ -163,21 +163,6 @@ function normalizeSheetRowsStrings(rows: TableRow[]): { rows: TableRow[]; column
   return { rows: normalizedRows, columns: safe };
 }
 
-// resolve id/apiKey to the correct path (handles locale)
-function getFieldPath(ctx: RenderFieldExtensionCtx, apiKeyOrId: string): string | null {
-  const fields = Object.values(ctx.fields) as any[];
-  const byId = (ctx.fields as any)[apiKeyOrId];
-  const id =
-    byId?.id ?? (fields.find(f => (f.apiKey ?? f.attributes?.api_key) === apiKeyOrId)?.id);
-  if (!id) return null;
-  return ctx.locale ? `${id}.${ctx.locale}` : id;
-}
-
-async function setFieldByApiOrId(ctx: RenderFieldExtensionCtx, apiKeyOrId: string, value: unknown) {
-  const path = getFieldPath(ctx, apiKeyOrId);
-  if (path) await ctx.setFieldValue(path, value);
-}
-
 function Alert({ children }: { children: React.ReactNode }) {
   return (
     <div
