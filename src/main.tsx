@@ -225,71 +225,81 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     return null;
   }
 
-  async function importFromSource() {
-    try {
-      setBusy(true);
-      setNotice(null);
+async function importFromSource() {
+  try {
+    setBusy(true);
+    setNotice(null);
 
-      const fileVal = getFileFieldValue();
-      if (!fileVal) {
-        setNotice(
-          'No file in the configured file field. Check "Source File API key" or upload a file (locale-aware).',
-        );
-        return;
-      }
-
-      const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
-      let url: string | null = null;
-
-      if ((fileVal as any).__direct_url) {
-        url = (fileVal as any).__direct_url as string;
-      } else {
-        if (!token) {
-          setNotice(
-            'Missing CMA token in plugin configuration (Settings → Plugins → this plugin → Configuration).',
-          );
-          return;
-        }
-        url = await fetchUploadUrlFromValue(fileVal, token);
-      }
-
-      if (!url) {
-        setNotice('Could not resolve upload URL from the file field value.');
-        return;
-      }
-
-      const res = await fetch(url);
-      const buf = await res.arrayBuffer();
-      const { rows: parsed, sheetNames: names } = toSheetJSRows(buf);
-
-      const normalized = normalizeSheetRowsStrings(parsed as TableRow[]);
-
-      setRows(normalized.rows);
-      setColumns(normalized.columns);
-      setSheetNames(names);
-
-      // Write JSON payload straight into the field
-      const payload = toMatrixPayload(
-        normalized.rows as Array<Record<string, string>>,
-        normalized.columns,
-      );
-      await ctx.setFieldValue(ctx.fieldPath, payload);
-
-      // Optional meta fields
-      if (params.columnsMetaApiKey) {
-        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: normalized.columns });
-      }
-      if (params.rowCountApiKey) {
-        await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(normalized.rows.length));
-      }
-
-      ctx.notice('Imported and saved JSON to field.');
-    } catch (e: any) {
-      setNotice(`Import failed: ${e?.message || e}`);
-    } finally {
-      setBusy(false);
+    // 1) Re-read the file field right before import
+    const fileVal = getFileFieldValue();
+    if (!fileVal) {
+      setNotice('No file in the configured file field. Upload one and try again.');
+      return;
     }
+
+    // 2) Resolve URL
+    const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
+    let url: string | null = null;
+
+    if ((fileVal as any).__direct_url) {
+      url = (fileVal as any).__direct_url as string;
+    } else {
+      if (!token) {
+        setNotice('Missing CMA token in plugin configuration.');
+        return;
+      }
+      url = await fetchUploadUrlFromValue(fileVal, token);
+    }
+    if (!url) {
+      setNotice('Could not resolve upload URL from the file field value.');
+      return;
+    }
+
+    // 3) Fetch with no cache
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
+    const buf = await res.arrayBuffer();
+
+    // 4) Parse & normalize
+    const { rows: parsed } = toSheetJSRows(buf);
+    const normalized = normalizeSheetRowsStrings(parsed as TableRow[]);
+
+    setRows(normalized.rows);
+    setColumns(normalized.columns);
+
+    // 5) Write an OBJECT into the JSON field, not a string
+    const objectPayload = {
+      columns,
+      data: (rows as Array<Record<string,string>>).map(r =>
+        columns.map(c => r[c] ?? '')
+      ),
+    };
+    await ctx.setFieldValue(ctx.fieldPath, objectPayload);
+    if (typeof (ctx as any).saveCurrentItem === 'function') {
+      await (ctx as any).saveCurrentItem();
+    }
+
+    // Optional meta fields
+    if (params.columnsMetaApiKey) {
+      await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: normalized.columns });
+    }
+    if (params.rowCountApiKey) {
+      await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(normalized.rows.length));
+    }
+
+    // 6) Persist immediately if the SDK exposes it
+    if (typeof (ctx as any).saveCurrentItem === 'function') {
+      await (ctx as any).saveCurrentItem();
+    }
+
+    ctx.notice('Imported and saved JSON to field.');
+  } catch (e: any) {
+    setNotice(`Import failed: ${e?.message || e}`);
+  } finally {
+    setBusy(false);
   }
+}
+
 
   async function saveAndPublish() {
     try {
