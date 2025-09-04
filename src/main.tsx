@@ -178,13 +178,13 @@ function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
  *  - Text field (or other) → stringified JSON
  */
 async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
-  const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
-  console.log(value, 'value')
+  // const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
+  console.log(JSON.stringify(payloadObj), 'value')
 
   // Clear first to guarantee a diff, then write
   await ctx.setFieldValue(ctx.fieldPath, null);
   await Promise.resolve();
-  await ctx.setFieldValue(ctx.fieldPath, value);
+  await ctx.setFieldValue(ctx.fieldPath, JSON.stringify(payloadObj));
 }
 
 function Alert({ children }: { children: React.ReactNode }) {
