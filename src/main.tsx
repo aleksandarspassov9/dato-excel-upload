@@ -230,14 +230,12 @@ async function importFromSource() {
     setBusy(true);
     setNotice(null);
 
-    // 1) Re-read the file field right before import
     const fileVal = getFileFieldValue();
     if (!fileVal) {
       setNotice('No file in the configured file field. Upload one and try again.');
       return;
     }
 
-    // 2) Resolve URL
     const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
     let url: string | null = null;
 
@@ -250,44 +248,33 @@ async function importFromSource() {
       }
       url = await fetchUploadUrlFromValue(fileVal, token);
     }
-    if (!url) {
-      setNotice('Could not resolve upload URL from the file field value.');
-      return;
-    }
 
-    // 3) Fetch with no cache
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
+    // 🔎 log right before fetch
+    console.log('fileVal', fileVal);
+    console.log('resolved url', url);
+    console.log('ctx.fieldPath', ctx.fieldPath);
+    console.log('current dataJson snapshot (before import):',
+      (ctx.formValues as any)[ctx.fieldPath]
+    );
+
+    const res = await fetch(url!, { cache: 'no-store' });
     const buf = await res.arrayBuffer();
 
-    // 4) Parse & normalize
     const { rows: parsed } = toSheetJSRows(buf);
     const normalized = normalizeSheetRowsStrings(parsed as TableRow[]);
 
-    setRows(normalized.rows);
-    setColumns(normalized.columns);
-
-    // 5) Write an OBJECT into the JSON field, not a string
     const objectPayload = {
-      columns,
-      data: (rows as Array<Record<string,string>>).map(r =>
-        columns.map(c => r[c] ?? '')
+      columns: normalized.columns,
+      data: normalized.rows.map(r =>
+        normalized.columns.map(c => (r as any)[c] ?? '')
       ),
     };
+
+    // 🔎 log right before writing
+    console.log('new objectPayload', objectPayload);
+
     await ctx.setFieldValue(ctx.fieldPath, objectPayload);
-    if (typeof (ctx as any).saveCurrentItem === 'function') {
-      await (ctx as any).saveCurrentItem();
-    }
 
-    // Optional meta fields
-    if (params.columnsMetaApiKey) {
-      await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: normalized.columns });
-    }
-    if (params.rowCountApiKey) {
-      await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(normalized.rows.length));
-    }
-
-    // 6) Persist immediately if the SDK exposes it
     if (typeof (ctx as any).saveCurrentItem === 'function') {
       await (ctx as any).saveCurrentItem();
     }
@@ -299,6 +286,7 @@ async function importFromSource() {
     setBusy(false);
   }
 }
+
 
 
   async function saveAndPublish() {
