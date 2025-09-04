@@ -179,6 +179,7 @@ function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
  */
 async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
   const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
+  console.log(value, 'value')
 
   // Clear first to guarantee a diff, then write
   await ctx.setFieldValue(ctx.fieldPath, null);
