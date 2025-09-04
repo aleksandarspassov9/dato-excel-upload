@@ -95,13 +95,10 @@ async function fetchUploadUrlFromValue(
 
 function toSheetJSRows(
   binary: ArrayBuffer,
-  preferredSheet?: string,
 ): { rows: TableRow[]; sheetNames: string[] } {
   const wb = XLSX.read(binary, { type: 'array' });
   const names = wb.SheetNames;
-  const target =
-    preferredSheet && names.includes(preferredSheet) ? preferredSheet : names[0];
-  const ws = wb.Sheets[target];
+  const ws = wb.Sheets[names[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { defval: null }) as TableRow[];
   return { rows, sheetNames: names };
 }
@@ -137,19 +134,13 @@ function toStringValue(v: unknown): string {
   return String(v);
 }
 
-function toMatrixPayload(rowsObj: Array<Record<string, string>>, columns: string[]) {
-  const data = rowsObj.map(r => columns.map(c => (r[c] ?? '')));
-  return JSON.stringify({ columns, data });
-}
-
 /** Normalize to safe column names and **string** cell values */
 function normalizeSheetRowsStrings(rows: TableRow[]): { rows: TableRow[]; columns: string[] } {
   if (!rows || rows.length === 0) return { rows: [], columns: [] };
 
-  // Force generic names
   const firstRow = rows[0] as Record<string, unknown>;
-  const colCount = Object.keys(firstRow).length;
-  const safe = Array.from({ length: colCount }, (_, i) => `column_${i+1}`);
+  const colCount = Math.max(1, Object.keys(firstRow).length);
+  const safe = Array.from({ length: colCount }, (_, i) => `column_${i + 1}`);
 
   const normalizedRows = rows.map((r) => {
     const values = Object.values(r);
@@ -161,6 +152,38 @@ function normalizeSheetRowsStrings(rows: TableRow[]): { rows: TableRow[]; column
   });
 
   return { rows: normalizedRows, columns: safe };
+}
+
+// resolve id/apiKey to the correct path (handles locale)
+function getFieldPath(ctx: RenderFieldExtensionCtx, apiKeyOrId: string): string | null {
+  const fields = Object.values(ctx.fields) as any[];
+  const byId = (ctx.fields as any)[apiKeyOrId];
+  const id =
+    byId?.id ?? (fields.find(f => (f.apiKey ?? f.attributes?.api_key) === apiKeyOrId)?.id);
+  if (!id) return null;
+  return ctx.locale ? `${id}.${ctx.locale}` : id;
+}
+
+async function setFieldByApiOrId(ctx: RenderFieldExtensionCtx, apiKeyOrId: string, value: unknown) {
+  const path = getFieldPath(ctx, apiKeyOrId);
+  if (path) await ctx.setFieldValue(path, value);
+}
+
+function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
+  return (ctx.field as any)?.attributes?.field_type === 'json';
+}
+
+/** Writes RAW JSON correctly depending on the field type:
+ *  - JSON field → object
+ *  - Text field (or other) → stringified JSON
+ */
+async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
+  const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
+
+  // Clear first to guarantee a diff, then write
+  await ctx.setFieldValue(ctx.fieldPath, null);
+  await Promise.resolve();
+  await ctx.setFieldValue(ctx.fieldPath, value);
 }
 
 function Alert({ children }: { children: React.ReactNode }) {
@@ -189,7 +212,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [rows, setRows] = useState<TableRow[]>([]);
   const [columns, setColumns] = useState<string[]>([]);
-  const [sheetNames] = useState<string[]>([]);
+  const [sheetNames, setSheetNames] = useState<string[]>([]);
 
   function getFileFieldValue() {
     const fileFieldId = resolveFieldId(ctx, preferredApiKey);
@@ -210,103 +233,104 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     return null;
   }
 
-async function importFromSource() {
-  try {
-    setBusy(true);
-    setNotice(null);
+  async function importFromSource() {
+    try {
+      setBusy(true);
+      setNotice(null);
 
-    const fileVal = getFileFieldValue();
-    if (!fileVal) {
-      setNotice('No file in the configured file field. Upload one and try again.');
-      return;
-    }
-
-    const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
-    let url: string | null = null;
-
-    if ((fileVal as any).__direct_url) {
-      url = (fileVal as any).__direct_url as string;
-    } else {
-      if (!token) {
-        setNotice('Missing CMA token in plugin configuration.');
+      const fileVal = getFileFieldValue();
+      if (!fileVal) {
+        setNotice('No file in the configured file field. Upload one and try again.');
         return;
       }
-      url = await fetchUploadUrlFromValue(fileVal, token);
+
+      const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
+      let url: string | null = null;
+
+      if ((fileVal as any).__direct_url) {
+        url = (fileVal as any).__direct_url as string;
+      } else {
+        if (!token) {
+          setNotice('Missing CMA token in plugin configuration (Uploads: read).');
+          return;
+        }
+        url = await fetchUploadUrlFromValue(fileVal, token);
+      }
+      if (!url) {
+        setNotice('Could not resolve upload URL from the file field value.');
+        return;
+      }
+
+      // Cache-bust to avoid stale Excel downloads
+      const bust = Date.now();
+      const res = await fetch(url + (url.includes('?') ? '&' : '?') + `cb=${bust}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
+      const buf = await res.arrayBuffer();
+
+      const { rows: parsed, sheetNames: names } = toSheetJSRows(buf);
+      const normalized = normalizeSheetRowsStrings(parsed as TableRow[]);
+
+      setRows(normalized.rows);
+      setColumns(normalized.columns);
+      setSheetNames(names);
+
+      const payloadObj = {
+        columns: normalized.columns,
+        data: normalized.rows.map(r =>
+          normalized.columns.map(c => (r as any)[c] ?? '')
+        ),
+        meta: { nonce: bust }, // ensures value changes even if content is identical
+      };
+
+      await writePayload(ctx, payloadObj);
+
+      // Optional meta fields
+      if (params.columnsMetaApiKey) {
+        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: normalized.columns });
+      }
+      if (params.rowCountApiKey) {
+        await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(normalized.rows.length));
+      }
+
+      // Persist immediately if possible
+      if (typeof (ctx as any).saveCurrentItem === 'function') {
+        await (ctx as any).saveCurrentItem();
+      }
+
+      ctx.notice('Imported and saved JSON to field.');
+    } catch (e: any) {
+      setNotice(`Import failed: ${e?.message || e}`);
+    } finally {
+      setBusy(false);
     }
-
-    // 🔎 log right before fetch
-    console.log('fileVal', fileVal);
-    console.log('resolved url', url);
-    console.log('ctx.fieldPath', ctx.fieldPath);
-    console.log('current dataJson snapshot (before import):',
-      (ctx.formValues as any)[ctx.fieldPath]
-    );
-
-    const res = await fetch(url!, { cache: 'no-store' });
-    const buf = await res.arrayBuffer();
-
-    const { rows: parsed } = toSheetJSRows(buf);
-    const normalized = normalizeSheetRowsStrings(parsed as TableRow[]);
-
-    const objectPayload = {
-      columns: normalized.columns,
-      data: normalized.rows.map(r =>
-        normalized.columns.map(c => (r as any)[c] ?? '')
-      ),
-    };
-
-    // 🔎 log right before writing
-    console.log('new objectPayload', objectPayload);
-
-    await ctx.setFieldValue(ctx.fieldPath, objectPayload);
-
-    if (typeof (ctx as any).saveCurrentItem === 'function') {
-      await (ctx as any).saveCurrentItem();
-    }
-
-    ctx.notice('Imported and saved JSON to field.');
-  } catch (e: any) {
-    setNotice(`Import failed: ${e?.message || e}`);
-  } finally {
-    setBusy(false);
   }
-}
-
-
 
   async function saveAndPublish() {
     try {
       setBusy(true);
       setNotice(null);
 
-      // Ensure field has the latest payload
-      const payload = toMatrixPayload(
-        (rows as Array<Record<string, string>>) ?? [],
-        columns ?? [],
-      );
-      await ctx.setFieldValue(ctx.fieldPath, payload);
+      const payloadObj = {
+        columns,
+        data: (rows as Array<Record<string, string>>).map(r => columns.map(c => r[c] ?? '')),
+        meta: { nonce: Date.now() },
+      };
 
-      // Try to save the current item via SDK, if exposed
+      await writePayload(ctx, payloadObj);
+
       if (typeof (ctx as any).saveCurrentItem === 'function') {
         await (ctx as any).saveCurrentItem();
       }
 
-      // Try to publish via CMA if token provided
       const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
-      const itemId =
-        (ctx as any).itemId ||
-        (ctx as any).item?.id ||
-        (ctx as any).item?.attributes?.id ||
-        null;
+      const itemId = (ctx as any).itemId || (ctx as any).item?.id || null;
 
       if (token && itemId) {
         const client = buildClient({ apiToken: token });
         await client.items.publish(itemId);
         ctx.notice('Saved & published!');
       } else {
-        setNotice(
-          'Saved JSON to the field. To publish the record, click “Publish” in the Dato editor (or add a CMA token with publish permissions).',
-        );
+        setNotice('Saved JSON. Click “Publish” in Dato, or add a CMA token with Items: write + publish.');
       }
     } catch (e: any) {
       setNotice(`Save/Publish failed: ${e?.message || e}`);
@@ -315,22 +339,20 @@ async function importFromSource() {
     }
   }
 
-  // If something else wrote to this field, keep local state in sync (optional)
+  // Keep local state in sync if something else writes to this field (optional)
   useEffect(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
-    if (typeof initial === 'string') {
-      try {
-        const parsed = JSON.parse(initial);
-        if (parsed?.columns && parsed?.data) {
-          setColumns(parsed.columns);
-          const asRows: TableRow[] = parsed.data.map((arr: string[]) =>
-            Object.fromEntries(parsed.columns.map((c: string, i: number) => [c, arr[i] ?? ''])),
-          );
-          setRows(asRows);
-        }
-      } catch {
-        // ignore invalid JSON
+    try {
+      const value = fieldExpectsJsonObject(ctx) ? initial : (initial ? JSON.parse(initial) : null);
+      if (value?.columns && value?.data) {
+        setColumns(value.columns);
+        const asRows: TableRow[] = value.data.map((arr: string[]) =>
+          Object.fromEntries(value.columns.map((c: string, i: number) => [c, arr[i] ?? ''])),
+        );
+        setRows(asRows);
       }
+    } catch {
+      // ignore invalid JSON in string fields
     }
   }, [ctx.fieldPath, ctx.formValues]);
 
@@ -342,6 +364,17 @@ async function importFromSource() {
         </Button>
         <Button onClick={saveAndPublish} disabled={busy} buttonType="primary">
           Save & Publish
+        </Button>
+        <Button
+          onClick={async () => {
+            await ctx.setFieldValue(ctx.fieldPath, null);
+            await Promise.resolve();
+            await importFromSource();
+          }}
+          disabled={busy}
+          buttonType="muted"
+        >
+          Force re-import
         </Button>
       </div>
 
@@ -368,7 +401,7 @@ function Config({ ctx }: { ctx: any }) {
       <TextField
         id="cmaToken"
         name="cmaToken"
-        label="CMA API Token (Uploads: Read; Items: Write + Publish for Save & Publish)"
+        label="CMA API Token (Uploads: read; Items: write + publish for Save & Publish)"
         value={token}
         onChange={setToken}
       />
@@ -399,7 +432,7 @@ connect({
         id: 'excelJsonUploader',
         name: 'Excel → JSON (Upload & Publish)',
         type: 'editor',
-        fieldTypes: ['json'],
+        fieldTypes: ['json', 'text'], // allow attaching to JSON or Text fields
         parameters: [
           { id: 'sourceFileApiKey', name: 'Source File API key', type: 'string', required: true },
           { id: 'columnsMetaApiKey', name: 'Columns Meta API key', type: 'string' },
@@ -416,4 +449,19 @@ connect({
   },
 });
 
-// Optional: dev harness if opened directly (not inside
+// Optional: dev harness if opened directly (not inside Dato)
+if (window.self === window.top) {
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <div style={{ padding: 16 }}>
+      <h3>Plugin dev harness</h3>
+      <p>
+        Embed this in Dato as a Private Plugin and attach it as the Field editor for your
+        <code> dataJson</code> (JSON or Text) field (Presentation tab).
+      </p>
+      <p>
+        You can override the file field via URL:
+        <code>?fileApiKey=another_file_field</code>
+      </p>
+    </div>,
+  );
+}
