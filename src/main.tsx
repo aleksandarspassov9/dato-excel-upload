@@ -81,6 +81,7 @@ function normalizeUploadLike(raw: any) {
 }
 function getSiblingFileFromBlock(ctx: RenderFieldExtensionCtx, apiKey: string) {
   const { container } = getBlockContainer(ctx);
+  console.log(container, 'container')
   if (!container || typeof container !== 'object') return null;
 
   // Most blocks keep child values keyed by apiKey; try that first
@@ -176,7 +177,7 @@ function Alert({ children }: { children: React.ReactNode }) {
 /** ---------- Editor (block-only) ---------- */
 function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const params = getEditorParams(ctx);
-  const sourceApiKey = params.sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY;
+  const sourceApiKey = DEFAULT_SOURCE_FILE_API_KEY;
 
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
