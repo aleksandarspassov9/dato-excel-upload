@@ -335,33 +335,6 @@ async function setSiblingInBlock(
   await ctx.setFieldValue(path, value);
 }
 
-
-  async function saveAndPublish() {
-    try {
-      setBusy(true);
-      setNotice(null);
-
-      if (typeof (ctx as any).saveCurrentItem === 'function') {
-        await (ctx as any).saveCurrentItem();
-      }
-
-      const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
-      const itemId = (ctx as any).itemId || (ctx as any).item?.id || null;
-
-      if (token && itemId) {
-        const client = buildClient({ apiToken: token });
-        await client.items.publish(itemId);
-        ctx.notice('Saved & published!');
-      } else {
-        setNotice('Saved JSON. Click “Publish” in Dato, or add a CMA token with Items: write + publish.');
-      }
-    } catch (e: any) {
-      setNotice(`Save/Publish failed: ${e?.message || e}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   useEffect(() => {}, [ctx.fieldPath, ctx.formValues]);
 
   return (
@@ -369,9 +342,6 @@ async function setSiblingInBlock(
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <Button onClick={importFromBlock} disabled={busy} buttonType="primary">
           Import from Excel/CSV (block)
-        </Button>
-        <Button onClick={saveAndPublish} disabled={busy} buttonType="primary">
-          Save & Publish
         </Button>
       </div>
       {busy && <Spinner />}
