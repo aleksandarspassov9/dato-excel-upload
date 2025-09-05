@@ -67,11 +67,6 @@ async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
 }
 
 /** =================== Block helpers (strictly same block) =================== */
-function splitPath(p: string) { return p.split('.').filter(Boolean); }
-function getAtPath(root: any, path: string[]) {
-  return path.reduce((acc: any, seg) => (acc ? acc[seg] : undefined), root);
-}
-
 /**
  * Deep-scan formValues to find the container object that directly holds this field (by id or apiKey).
  */
