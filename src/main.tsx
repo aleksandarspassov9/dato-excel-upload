@@ -309,6 +309,34 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     }
   }
 
+  /**
+ * Set a sibling field inside the SAME block.
+ * It builds the path using the sibling field's **id** (preferred) and appends the locale segment when needed.
+ */
+async function setSiblingInBlock(
+  ctx: RenderFieldExtensionCtx,
+  apiKey: string,
+  value: any,
+) {
+  const hit = findBlockContainerWithCurrentField(ctx);
+  if (!hit) return;
+  const { containerPath } = hit;
+
+  // Find sibling field definition by apiKey
+  const allDefs = Object.values(ctx.fields) as any[];
+  const def = allDefs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === apiKey);
+
+  // Prefer id-based path; fall back to apiKey if we can't resolve the def
+  const key = def?.id ? String(def.id) : apiKey;
+
+  // Respect localization if the target field is localized
+  const isLocalized = Boolean(def?.localized ?? def?.attributes?.localized);
+  const path = [...containerPath, key, ...(isLocalized && ctx.locale ? [ctx.locale] : [])].join('.');
+
+  await ctx.setFieldValue(path, value);
+}
+
+
   async function saveAndPublish() {
     try {
       setBusy(true);
