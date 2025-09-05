@@ -44,11 +44,9 @@ function toStringValue(v: unknown): string {
   if (typeof v === 'number' && Number.isNaN(v)) return '';
   return String(v);
 }
-function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
-  return (ctx.field as any)?.attributes?.field_type === 'json';
-}
+
 async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
-  const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
+  const value = JSON.stringify(payloadObj);
   await ctx.setFieldValue(ctx.fieldPath, null);
   await Promise.resolve();
   await ctx.setFieldValue(ctx.fieldPath, value);
