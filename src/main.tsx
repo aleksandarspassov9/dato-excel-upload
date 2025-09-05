@@ -235,43 +235,6 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  // Auto-clear dataJson when the block's source file is removed
-useEffect(() => {
-  (async () => {
-    try {
-      const hit = findBlockContainerWithCurrentField(ctx);
-      if (!hit) return;
-      const { container } = hit;
-
-      // strictly check the configured source field (no fallbacks/scans)
-      const allDefs = Object.values(ctx.fields) as any[];
-      const sibDef = allDefs.find(
-        (f: any) => (f.apiKey ?? f.attributes?.api_key) === sourceApiKey
-      );
-
-      let raw: any = undefined;
-      if (sibDef && Object.prototype.hasOwnProperty.call(container, String(sibDef.id))) {
-        raw = pickAnyLocaleValue(container[String(sibDef.id)], ctx.locale);
-      } else if (Object.prototype.hasOwnProperty.call(container, sourceApiKey)) {
-        raw = pickAnyLocaleValue(container[sourceApiKey], ctx.locale);
-      }
-
-      const hasFile = Boolean(normalizeUploadLike(raw));
-      if (!hasFile) {
-        const emptyPayload =
-          PAYLOAD_SHAPE === 'matrix'
-            ? { columns: [], data: [], meta: { cleared_at: new Date().toISOString() } }
-            : { rows: [], meta: { cleared_at: new Date().toISOString() } };
-
-        await writePayload(ctx, emptyPayload);
-      }
-    } catch {
-      // ignore
-    }
-  })();
-}, [ctx.formValues, ctx.locale, sourceApiKey]);
-
-
   async function importFromBlock() {
     try {
       setBusy(true);
