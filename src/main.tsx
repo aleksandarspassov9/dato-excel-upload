@@ -17,19 +17,19 @@ import 'datocms-react-ui/styles.css';
 
 /** =================== Config =================== */
 const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile';
-const PAYLOAD_SHAPE: 'matrix' | 'rows' = 'matrix'; // set 'rows' if your field expects { rows: [...] }
-const DEBUG = false; // set true to see console logs
+const PAYLOAD_SHAPE: 'matrix' | 'rows' = 'matrix'; // set to 'rows' if your JSON field expects { rows: [...] }
+const DEBUG = false; // set to true to see logs
 
 type TableRow = Record<string, string>;
 type FieldParams = {
-  sourceFileApiKey?: string;   // e.g. "sourcefile"
-  columnsMetaApiKey?: string;  // optional sibling json/text to write { columns }
-  rowCountApiKey?: string;     // optional sibling number/text to write row count
+  sourceFileApiKey?: string;
+  columnsMetaApiKey?: string;
+  rowCountApiKey?: string;
 };
 
-/** =================== Tiny utils =================== */
-const log = (...args: any[]) => { if (DEBUG) console.log('[excel-json-block]', ...args); };
+const log = (...a: any[]) => { if (DEBUG) console.log('[excel-json-block]', ...a); };
 
+/** =================== Small utils =================== */
 function getEditorParams(ctx: RenderFieldExtensionCtx): FieldParams {
   const direct = (ctx.parameters as any) || {};
   if (direct && Object.keys(direct).length) return direct;
@@ -49,7 +49,6 @@ function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
 }
 async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
   const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
-  // Clear first to force a diff
   await ctx.setFieldValue(ctx.fieldPath, null);
   await Promise.resolve();
   await ctx.setFieldValue(ctx.fieldPath, value);
@@ -61,92 +60,126 @@ function pickAnyLocaleValue(raw: any, locale?: string | null) {
   return null;
 }
 
-/** =================== Path helpers (block-only) =================== */
-/**
- * Dissect the current fieldPath into: containerPath (array of segments),
- * the key of the current field (by id), and whether a trailing locale segment was present.
- */
-function dissectCurrentPath(ctx: RenderFieldExtensionCtx) {
-  const parts = String(ctx.fieldPath).split('.').filter(Boolean);
-  let localeWasSuffix = false;
-  if (ctx.locale && parts[parts.length - 1] === String(ctx.locale)) {
-    localeWasSuffix = true;
-    parts.pop(); // drop locale segment
+/** =================== Find current block container =================== */
+function findBlockContainerWithCurrentField(
+  ctx: RenderFieldExtensionCtx,
+): { container: any; containerPath: string[] } | null {
+  const root = (ctx as any).formValues;
+  const cur: any = ctx.field;
+  const curId = String(cur?.id);
+  const curApi = cur?.apiKey ?? cur?.attributes?.api_key;
+
+  function walk(node: any, path: string[]): { container: any; containerPath: string[] } | null {
+    if (!node || typeof node !== 'object') return null;
+
+    if (Object.prototype.hasOwnProperty.call(node, curId) ||
+        (curApi && Object.prototype.hasOwnProperty.call(node, curApi))) {
+      return { container: node, containerPath: path };
+    }
+
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i++) {
+        const r = walk(node[i], path.concat(String(i)));
+        if (r) return r;
+      }
+      return null;
+    }
+
+    for (const k of Object.keys(node)) {
+      const r = walk(node[k], path.concat(k));
+      if (r) return r;
+    }
+    return null;
   }
-  const currentKey = parts.pop() || '';
-  const containerPath = parts; // array of segments
-  log('dissect', { fieldPath: ctx.fieldPath, containerPath, currentKey, localeWasSuffix });
-  return { containerPath, currentKey, localeWasSuffix };
+
+  return walk(root, []);
 }
 
-/** Read a value from formValues via dotted path (supports arrays) */
-function getValueAt(root: any, dotted: string) {
-  const parts = dotted.split('.').filter(Boolean);
-  return parts.reduce((acc: any, seg) => (acc == null ? acc : acc[seg]), root);
-}
-
-/** Convert any upload-like to a normalized shape we can use */
+/** =================== Upload value helpers =================== */
 function normalizeUploadLike(raw: any) {
   if (!raw) return null;
-  if (Array.isArray(raw)) raw = raw[0];
-  if (!raw) return null;
-  if (raw?.upload_id) return raw;
-  if (raw?.upload?.id) return { upload_id: raw.upload.id };
-  if (typeof raw === 'string' && raw.startsWith('http')) return { __direct_url: raw };
+  const v = Array.isArray(raw) ? raw[0] : raw;
+  if (!v) return null;
+  if (v?.upload_id) return v;
+  if (v?.upload?.id) return { upload_id: v.upload.id };
+  if (typeof v === 'string' && v.startsWith('http')) return { __direct_url: v };
   return null;
 }
 
-/**
- * Resolve the sibling file value by building a path using the sibling field **id** (preferred) and
- * optionally the apiKey as a fallback. This is the key change that avoids returning null.
- */
+/** Deeply search an object for any upload-like structure */
+function findFirstUploadDeep(val: any): any | null {
+  if (!val) return null;
+  const candidate = normalizeUploadLike(val);
+  if (candidate) return candidate;
+
+  if (Array.isArray(val)) {
+    for (const it of val) {
+      const n = findFirstUploadDeep(it);
+      if (n) return n;
+    }
+    return null;
+  }
+  if (typeof val === 'object') {
+    for (const k of Object.keys(val)) {
+      const n = findFirstUploadDeep(val[k]);
+      if (n) return n;
+    }
+  }
+  return null;
+}
+
+/** =================== Sibling file lookup (never leaves this block) =================== */
 function getSiblingFileFromBlock(ctx: RenderFieldExtensionCtx, siblingApiKey: string) {
-  const { containerPath } = dissectCurrentPath(ctx);
-  const root = (ctx as any).formValues;
+  const hit = findBlockContainerWithCurrentField(ctx);
+  if (!hit) { log('no block container found'); return null; }
+  const { container } = hit;
 
-  // Find sibling field definition by apiKey (works both for block fields and globals)
+  // Field definition by API key (if available)
   const allDefs = Object.values(ctx.fields) as any[];
-  const siblingDef = allDefs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === siblingApiKey);
-  const isLocalized = Boolean(siblingDef?.localized ?? siblingDef?.attributes?.localized);
-  const locSuffix = isLocalized && ctx.locale ? `.${ctx.locale}` : '';
+  const sibDef = allDefs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === siblingApiKey);
+  const isLocalized = Boolean(sibDef?.localized ?? sibDef?.attributes?.localized);
 
-  // Prefer the ID path — blocks typically store by field id
-  if (siblingDef?.id) {
-    const idPath = [...containerPath, String(siblingDef.id)].join('.') + locSuffix;
-    const rawId = pickAnyLocaleValue(getValueAt(root, idPath), ctx.locale);
-    const normId = normalizeUploadLike(rawId);
-    log('try idPath', idPath, '→', normId ? 'found' : 'miss');
-    if (normId) return normId;
+  // 1) Try by ID key (typical for blocks)
+  if (sibDef?.id && Object.prototype.hasOwnProperty.call(container, String(sibDef.id))) {
+    const raw = isLocalized ? pickAnyLocaleValue(container[String(sibDef.id)], ctx.locale)
+                            : container[String(sibDef.id)];
+    const norm = normalizeUploadLike(raw) || findFirstUploadDeep(raw);
+    log('try by id', sibDef.id, '→', !!norm);
+    if (norm) return norm;
   }
 
-  // Fallback: try apiKey path (some block editors keep apiKey)
-  const ak = siblingDef?.apiKey ?? siblingDef?.attributes?.api_key ?? siblingApiKey;
-  const akPath = [...containerPath, ak].join('.') + locSuffix;
-  const rawAk = pickAnyLocaleValue(getValueAt(root, akPath), ctx.locale);
-  const normAk = normalizeUploadLike(rawAk);
-  log('try akPath', akPath, '→', normAk ? 'found' : 'miss');
-  if (normAk) return normAk;
+  // 2) Try by API key stored directly
+  if (Object.prototype.hasOwnProperty.call(container, siblingApiKey)) {
+    const raw = isLocalized ? pickAnyLocaleValue(container[siblingApiKey], ctx.locale)
+                            : container[siblingApiKey];
+    const norm = normalizeUploadLike(raw) || findFirstUploadDeep(raw);
+    log('try by apiKey', siblingApiKey, '→', !!norm);
+    if (norm) return norm;
+  }
 
-  // Nothing found
+  // 3) Safety net: scan this container’s keys and pick an upload-like value.
+  // Prefer a key whose apiKey maps to siblingApiKey; otherwise first upload-like.
+  let fallback: any | null = null;
+  for (const k of Object.keys(container)) {
+    const defById = (ctx.fields as any)[k] || allDefs.find((f: any) => String(f.id) === String(k));
+    const keyApi = defById ? (defById.apiKey ?? defById.attributes?.api_key) : k;
+    const val = pickAnyLocaleValue(container[k], ctx.locale);
+    const norm = normalizeUploadLike(val) || findFirstUploadDeep(val);
+    if (!norm) continue;
+
+    if (keyApi === siblingApiKey) {
+      log('fallback scan matched by apiKey', k);
+      return norm;
+    }
+    if (!fallback) fallback = norm;
+  }
+  if (fallback) {
+    log('fallback scan returning first upload-like value');
+    return fallback;
+  }
+
+  log('no upload-like value found in container');
   return null;
-}
-
-/**
- * Set a sibling field inside the same block using its field **id** path (with locale when needed).
- * This avoids ambiguity and works even when the container stores children by id.
- */
-async function setSiblingInBlock(ctx: RenderFieldExtensionCtx, apiKey: string, value: any) {
-  const { containerPath } = dissectCurrentPath(ctx);
-  const allDefs = Object.values(ctx.fields) as any[];
-  const def = allDefs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === apiKey);
-  if (!def?.id) return;
-
-  const isLocalized = Boolean(def.localized ?? def.attributes?.localized);
-  const locSuffix = isLocalized && ctx.locale ? `.${ctx.locale}` : '';
-  const targetPath = [...containerPath, String(def.id)].join('.') + locSuffix;
-
-  log('setSiblingInBlock', { apiKey, targetPath, isLocalized });
-  await ctx.setFieldValue(targetPath, value);
 }
 
 /** =================== Robust parsing (headerless-safe) =================== */
@@ -210,7 +243,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setNotice(null);
 
       const fileVal = getSiblingFileFromBlock(ctx, sourceApiKey);
-      log('resolved sibling file', fileVal);
+      log('resolved sibling file →', fileVal);
       if (!fileVal) {
         setNotice(`No file found in this block’s "${sourceApiKey}" field. Upload an .xlsx/.xls/.csv there and try again.`);
         return;
@@ -218,14 +251,8 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
       const meta = await fetchUploadMeta(fileVal, token);
-      if (!meta?.url) {
-        setNotice('Could not resolve upload URL. Add a CMA token with "Uploads: read" in the plugin configuration.');
-        return;
-      }
-      if (meta.mime && meta.mime.startsWith('image/')) {
-        setNotice(`"${meta.filename ?? 'selected file'}" looks like an image (${meta.mime}). Please upload an Excel/CSV file.`);
-        return;
-      }
+      if (!meta?.url) { setNotice('Could not resolve upload URL. Add a CMA token with "Uploads: read" in the plugin configuration.'); return; }
+      if (meta.mime && meta.mime.startsWith('image/')) { setNotice(`"${meta.filename ?? 'selected file'}" looks like an image (${meta.mime}). Please upload an Excel/CSV file.`); return; }
 
       // Fetch with cache-busting
       const bust = Date.now();
@@ -263,7 +290,6 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       await writePayload(ctx, payloadObj);
 
-      // Optional sibling meta inside this block
       if (params.columnsMetaApiKey && PAYLOAD_SHAPE === 'matrix') {
         await setSiblingInBlock(ctx, params.columnsMetaApiKey, { columns: norm.columns });
       }
