@@ -246,6 +246,8 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const params = getEditorParams(ctx);
   const sourceApiKey = params.sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY;
 
+  console.log(sourceApiKey, 'sourceApiKey')
+
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
