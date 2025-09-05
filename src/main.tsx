@@ -442,7 +442,11 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   return (
     <Canvas ctx={ctx}>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <Button onClick={() => importFromSource()} disabled={busy} buttonType="primary">
+        <Button
+          onClick={() => importFromSource({ fromApiKey: preferredApiKey })}
+          disabled={busy}
+          buttonType="primary"
+        >
           Import from Excel/CSV
         </Button>
         <Button onClick={saveAndPublish} disabled={busy} buttonType="primary">
