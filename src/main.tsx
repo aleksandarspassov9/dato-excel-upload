@@ -176,28 +176,39 @@ async function setFieldByApiOrId(ctx: RenderFieldExtensionCtx, apiKeyOrId: strin
 }
 
 /** Get sibling file value from this block by API key */
+// Replace the entire function with this:
 function getSiblingFileFromBlock(ctx: RenderFieldExtensionCtx, siblingApiKey: string) {
   const hit = findBlockContainerWithCurrentField(ctx);
   if (!hit) return null;
   const { container } = hit;
 
-  // try both id and apiKey
-  const def = findFieldDef(ctx, siblingApiKey);
-  const keyCandidates = def
-    ? [String(def.id), def.apiKey ?? def.attributes?.api_key].filter(Boolean)
-    : [siblingApiKey];
-  const key = keyCandidates.find((k) => Object.prototype.hasOwnProperty.call(container, k));
-  if (!key) return null;
+  // Scan actual keys in this block instance and match by apiKey at those keys
+  for (const k of Object.keys(container)) {
+    const def =
+      (ctx.fields as any)[k] ||
+      (Object.values(ctx.fields) as any[]).find(
+        (f: any) => (f.apiKey ?? f.attributes?.api_key) === k
+      );
+    if (!def) continue;
 
-  let raw = container[key];
-  raw = pickAnyLocaleValue(raw, ctx.locale);
-  if (!raw) return null;
-  if (Array.isArray(raw)) raw = raw[0];
-  if (raw?.upload_id) return raw;
-  if (raw?.upload?.id) return { upload_id: raw.upload.id };
-  if (typeof raw === 'string' && raw.startsWith('http')) return { __direct_url: raw };
+    const type = def.fieldType ?? def.attributes?.field_type;
+    const apiKey = def.apiKey ?? def.attributes?.api_key;
+    if (type !== 'file') continue;
+    if (apiKey !== siblingApiKey) continue;
+
+    // Get localized value at this exact key
+    let raw = pickAnyLocaleValue(container[k], ctx.locale);
+    if (!raw) return null;
+
+    if (Array.isArray(raw)) raw = raw[0];
+    if (raw?.upload_id) return raw;
+    if (raw?.upload?.id) return { upload_id: raw.upload.id };
+    if (typeof raw === 'string' && raw.startsWith('http')) return { __direct_url: raw };
+    return null;
+  }
   return null;
 }
+
 
 /** List file siblings inside this block (for assist UI) */
 function listBlockFileSiblings(ctx: RenderFieldExtensionCtx) {
