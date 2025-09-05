@@ -338,6 +338,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       let rowsParsed: TableRow[] = [];
       let names: string[] = [];
 
+      console.log(res, 'res')
       if (ct.includes('csv')) {
         const text = await res.text();
         const wb = XLSX.read(text, { type: 'string' });
