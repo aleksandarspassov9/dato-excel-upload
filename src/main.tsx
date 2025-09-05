@@ -274,6 +274,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       const norm = normalizeAoA(aoa);
 
+      console.log(norm, 'norm')
       const payloadObj =
         PAYLOAD_SHAPE === 'matrix'
           ? {
