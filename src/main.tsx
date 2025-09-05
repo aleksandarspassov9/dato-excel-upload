@@ -66,6 +66,7 @@ function getAtPath(root: any, path: string) {
 /** Get the container object for this block (the object that contains dataJson) */
 function getBlockContainer(ctx: RenderFieldExtensionCtx) {
   const p = parentPath(ctx.fieldPath);
+  console.log(ctx, p)
   const container = getAtPath((ctx as any).formValues, p);
   return { container, containerPath: p };
 }
