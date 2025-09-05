@@ -58,27 +58,46 @@ function pickAnyLocaleValue(raw: any, locale?: string | null) {
   return null;
 }
 
-/** =================== Robust path helpers (fix for repeated blocks) =================== */
-function splitPath(path: string) {
-  return path.split('.').filter(Boolean);
-}
-function getAtPath(root: any, parts: string[]) {
-  return parts.reduce((acc, k) => (acc ? acc[k] : undefined), root);
-}
-/** Returns the container object + its path parts for the *current* block instance */
-function resolveCurrentBlockContainer(ctx: RenderFieldExtensionCtx): { container: any; containerPath: string[] } | null {
-  const root = (ctx as any).formValues;
-  if (!root) return null;
+/** =================== Path-based sibling helpers (bulletproof for repeated blocks) =================== */
+function splitPath(p: string) { return p.split('.').filter(Boolean); }
 
-  const parts = splitPath(ctx.fieldPath);
-  // If the last segment is the locale, drop it
-  if (ctx.locale && parts[parts.length - 1] === ctx.locale) parts.pop();
-  // Drop the current field key => the remainder is the block container path
-  parts.pop();
+function pathWithoutLocaleTail(parts: string[], locale?: string | null) {
+  if (!locale) return parts;
+  if (parts[parts.length - 1] === locale) return parts.slice(0, -1);
+  return parts;
+}
 
-  const container = getAtPath(root, parts);
-  if (!container || typeof container !== 'object') return null;
-  return { container, containerPath: parts };
+/** Build the absolute path to a sibling field that lives in the SAME block instance. */
+function buildSiblingPathInSameBlock(
+  ctx: RenderFieldExtensionCtx,
+  siblingKey: string,    // numeric id as string, or apiKey
+  isLocalized: boolean,
+) {
+  // ctx.fieldPath points to the current field (possibly ending with ".<locale>")
+  let parts = splitPath(ctx.fieldPath);
+  parts = pathWithoutLocaleTail(parts, ctx.locale);
+
+  // Replace the *current field key* with the sibling key
+  parts[parts.length - 1] = siblingKey;
+
+  // Re-append locale segment if target is localized
+  if (isLocalized && ctx.locale) parts.push(ctx.locale);
+
+  return parts.join('.');
+}
+
+/** Safe read from either ctx.getFieldValue or raw formValues */
+function readPath(ctx: RenderFieldExtensionCtx, absPath: string) {
+  const parts = splitPath(absPath);
+  const anyCtx: any = ctx as any;
+
+  if (typeof anyCtx.getFieldValue === 'function') {
+    // Some Dato contexts expose this helper
+    return anyCtx.getFieldValue(absPath);
+  }
+
+  // Fallback to walking formValues
+  return parts.reduce((acc, k) => (acc ? acc[k] : undefined), (ctx as any).formValues);
 }
 
 /** =================== Upload value helpers =================== */
@@ -92,7 +111,7 @@ function normalizeUploadLike(raw: any) {
   return null;
 }
 
-/** Deeply search an object for any upload-like structure */
+/** Deeply search an object for any upload-like structure (used as a last resort) */
 function findFirstUploadDeep(val: any): any | null {
   if (!val) return null;
   const candidate = normalizeUploadLike(val);
@@ -114,58 +133,25 @@ function findFirstUploadDeep(val: any): any | null {
   return null;
 }
 
-/** =================== Sibling file lookup (scoped to THIS block) =================== */
+/** =================== Sibling file lookup (scoped to THIS block by path) =================== */
 function getSiblingFileFromBlock(ctx: RenderFieldExtensionCtx, siblingApiKey: string) {
-  const hit = resolveCurrentBlockContainer(ctx);
-  if (!hit) { log('no block container found'); return null; }
-  const { container } = hit;
-
-  // Field definition by API key (if available)
+  // Resolve the sibling field definition (for id + localization)
   const allDefs = Object.values(ctx.fields) as any[];
   const sibDef = allDefs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === siblingApiKey);
+
+  // Prefer numeric id inside blocks; otherwise fall back to apiKey
+  const siblingKey = sibDef?.id ? String(sibDef.id) : siblingApiKey;
   const isLocalized = Boolean(sibDef?.localized ?? sibDef?.attributes?.localized);
 
-  // 1) Try by numeric/id key (typical inside blocks)
-  if (sibDef?.id && Object.prototype.hasOwnProperty.call(container, String(sibDef.id))) {
-    const raw = isLocalized ? pickAnyLocaleValue(container[String(sibDef.id)], ctx.locale)
-                            : container[String(sibDef.id)];
-    const norm = normalizeUploadLike(raw) || findFirstUploadDeep(raw);
-    log('try by id', sibDef.id, '→', !!norm);
-    if (norm) return norm;
-  }
+  // Build exact path in THIS block instance
+  const sibPath = buildSiblingPathInSameBlock(ctx, siblingKey, isLocalized);
 
-  // 2) Try by API key stored directly
-  if (Object.prototype.hasOwnProperty.call(container, siblingApiKey)) {
-    const raw = isLocalized ? pickAnyLocaleValue(container[siblingApiKey], ctx.locale)
-                            : container[siblingApiKey];
-    const norm = normalizeUploadLike(raw) || findFirstUploadDeep(raw);
-    log('try by apiKey', siblingApiKey, '→', !!norm);
-    if (norm) return norm;
-  }
+  // Read and normalize
+  const raw = readPath(ctx, sibPath);
+  const norm = normalizeUploadLike(pickAnyLocaleValue(raw, ctx.locale)) || findFirstUploadDeep(raw);
 
-  // 3) Safety net: scan this container’s keys and pick an upload-like value.
-  // Prefer a key whose apiKey maps to siblingApiKey; otherwise first upload-like.
-  let fallback: any | null = null;
-  for (const k of Object.keys(container)) {
-    const defById = (ctx.fields as any)[k] || allDefs.find((f: any) => String(f.id) === String(k));
-    const keyApi = defById ? (defById.apiKey ?? defById.attributes?.api_key) : k;
-    const val = pickAnyLocaleValue(container[k], ctx.locale);
-    const norm = normalizeUploadLike(val) || findFirstUploadDeep(val);
-    if (!norm) continue;
-
-    if (keyApi === siblingApiKey) {
-      log('fallback scan matched by apiKey', k);
-      return norm;
-    }
-    if (!fallback) fallback = norm;
-  }
-  if (fallback) {
-    log('fallback scan returning first upload-like value');
-    return fallback;
-  }
-
-  log('no upload-like value found in container');
-  return null;
+  log('current fieldPath:', ctx.fieldPath, '→ sibling path:', sibPath, 'found?', !!norm);
+  return norm || null;
 }
 
 /** =================== Robust parsing (headerless-safe) =================== */
@@ -304,22 +290,16 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     apiKey: string,
     value: any,
   ) {
-    const hit = resolveCurrentBlockContainer(ctx);
-    if (!hit) return;
-    const { containerPath } = hit;
-
     // Find sibling field definition by apiKey
     const allDefs = Object.values(ctx.fields) as any[];
     const def = allDefs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === apiKey);
 
     // Prefer id-based path; fall back to apiKey if we can't resolve the def
-    const key = def?.id ? String(def.id) : apiKey;
-
-    // Respect localization if the target field is localized
+    const siblingKey = def?.id ? String(def.id) : apiKey;
     const isLocalized = Boolean(def?.localized ?? def?.attributes?.localized);
-    const path = [...containerPath, key, ...(isLocalized && ctx.locale ? [ctx.locale] : [])].join('.');
 
-    await ctx.setFieldValue(path, value);
+    const sibPath = buildSiblingPathInSameBlock(ctx, siblingKey, isLocalized);
+    await ctx.setFieldValue(sibPath, value);
   }
 
   useEffect(() => {}, [ctx.fieldPath, ctx.formValues]);
