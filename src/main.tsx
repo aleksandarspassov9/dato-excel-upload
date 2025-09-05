@@ -16,7 +16,7 @@ import * as XLSX from 'xlsx';
 import 'datocms-react-ui/styles.css';
 
 /** CONFIG */
-const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile';
+// const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile';
 type TableRow = Record<string, unknown>;
 type FieldParams = {
   sourceFileApiKey?: string;       // sibling file field api key in this block
