@@ -293,9 +293,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       const effectiveKey = opts?.fromApiKey ?? preferredApiKey;
       // Prefer the sibling inside the same block; optionally force top-level
-      let fileVal = opts?.preferTopLevel
-      ? getTopLevelFileValueByApiKey(ctx, effectiveKey)
-      : getSiblingFileFromBlock(ctx, effectiveKey) || getTopLevelFileValueByApiKey(ctx, effectiveKey);
+      let fileVal = getSiblingFileFromBlock(ctx, effectiveKey)
       
       console.log(ctx, effectiveKey, 'opts');
       console.log(fileVal, 'fileVal')
@@ -338,7 +336,6 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       let rowsParsed: TableRow[] = [];
       let names: string[] = [];
 
-      console.log(res, 'res')
       if (ct.includes('csv')) {
         const text = await res.text();
         const wb = XLSX.read(text, { type: 'string' });
