@@ -292,12 +292,13 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setNotice(null);
 
       const effectiveKey = opts?.fromApiKey ?? preferredApiKey;
-      console.log(opts, 'opts')
       // Prefer the sibling inside the same block; optionally force top-level
       let fileVal = opts?.preferTopLevel
-        ? getTopLevelFileValueByApiKey(ctx, effectiveKey)
-        : getSiblingFileFromBlock(ctx, effectiveKey) || getTopLevelFileValueByApiKey(ctx, effectiveKey);
-
+      ? getTopLevelFileValueByApiKey(ctx, effectiveKey)
+      : getSiblingFileFromBlock(ctx, effectiveKey) || getTopLevelFileValueByApiKey(ctx, effectiveKey);
+      
+      console.log(ctx, effectiveKey, 'opts')
+      
       if (!fileVal) {
         const blockList = blockSiblings.length
           ? `Block file fields: ${blockSiblings.map(b => `${b.apiKey}${b.hasValue ? ' (has value)' : ''}`).join(', ')}. `
