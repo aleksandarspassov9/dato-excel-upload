@@ -177,37 +177,73 @@ async function setFieldByApiOrId(ctx: RenderFieldExtensionCtx, apiKeyOrId: strin
 
 /** Get sibling file value from this block by API key */
 // Replace the entire function with this:
+function normalizeUploadLike(raw: any) {
+  if (!raw) return null;
+  // block fields can be single-asset or arrays
+  if (Array.isArray(raw)) raw = raw[0];
+  // value can be localized object -> strip locale already done by caller
+  if (!raw) return null;
+
+  if (raw?.upload_id) return raw;
+  if (raw?.upload?.id) return { upload_id: raw.upload.id };
+  if (typeof raw === 'string' && raw.startsWith('http')) return { __direct_url: raw };
+  return null;
+}
+
+function looksLikeUploadValue(raw: any, locale?: string | null) {
+  const v = pickAnyLocaleValue(raw, locale);
+  return Boolean(
+    (Array.isArray(v) && v.length && (v[0]?.upload_id || v[0]?.upload?.id || (typeof v[0] === 'string' && v[0].startsWith('http')))) ||
+    v?.upload_id ||
+    v?.upload?.id ||
+    (typeof v === 'string' && v.startsWith('http'))
+  );
+}
+
 function getSiblingFileFromBlock(ctx: RenderFieldExtensionCtx, siblingApiKey: string) {
   const hit = findBlockContainerWithCurrentField(ctx);
   if (!hit) return null;
   const { container } = hit;
 
-  // Scan actual keys in this block instance and match by apiKey at those keys
-  for (const k of Object.keys(container)) {
-    const def =
-      (ctx.fields as any)[k] ||
-      (Object.values(ctx.fields) as any[]).find(
-        (f: any) => (f.apiKey ?? f.attributes?.api_key) === k
-      );
-    if (!def) continue;
-
-    const type = def.fieldType ?? def.attributes?.field_type;
-    const apiKey = def.apiKey ?? def.attributes?.api_key;
-    if (type !== 'file') continue;
-    if (apiKey !== siblingApiKey) continue;
-
-    // Get localized value at this exact key
-    let raw = pickAnyLocaleValue(container[k], ctx.locale);
-    if (!raw) return null;
-
-    if (Array.isArray(raw)) raw = raw[0];
-    if (raw?.upload_id) return raw;
-    if (raw?.upload?.id) return { upload_id: raw.upload.id };
-    if (typeof raw === 'string' && raw.startsWith('http')) return { __direct_url: raw };
-    return null;
+  // 1) Direct key by API key (most common in blocks)
+  if (Object.prototype.hasOwnProperty.call(container, siblingApiKey)) {
+    const raw = pickAnyLocaleValue(container[siblingApiKey], ctx.locale);
+    const norm = normalizeUploadLike(raw);
+    if (norm) return norm;
   }
+
+  // 2) By field id, if we can resolve a definition for the apiKey
+  const allDefs = Object.values(ctx.fields) as any[];
+  const def = allDefs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === siblingApiKey);
+  if (def && Object.prototype.hasOwnProperty.call(container, String(def.id))) {
+    const raw = pickAnyLocaleValue(container[String(def.id)], ctx.locale);
+    const norm = normalizeUploadLike(raw);
+    if (norm) return norm;
+  }
+
+  // 3) Last resort: scan container keys and pick the one that looks like an upload
+  // Prefer a key whose *name* matches the apiKey, otherwise the first upload-like value.
+  let candidateKey: string | null = null;
+  if (Object.prototype.hasOwnProperty.call(container, siblingApiKey) &&
+      looksLikeUploadValue(container[siblingApiKey], ctx.locale)) {
+    candidateKey = siblingApiKey;
+  } else {
+    for (const k of Object.keys(container)) {
+      if (looksLikeUploadValue(container[k], ctx.locale)) {
+        candidateKey = k;
+        break;
+      }
+    }
+  }
+
+  if (candidateKey) {
+    const raw = pickAnyLocaleValue(container[candidateKey], ctx.locale);
+    return normalizeUploadLike(raw);
+  }
+
   return null;
 }
+
 
 
 /** List file siblings inside this block (for assist UI) */
@@ -248,19 +284,6 @@ function listTopLevelFileFields(ctx: RenderFieldExtensionCtx) {
       label: f.label ?? f.attributes?.label,
     }));
 }
-function getTopLevelFileValueByApiKey(ctx: RenderFieldExtensionCtx, apiKey: string) {
-  const list = listTopLevelFileFields(ctx);
-  const match = list.find((f) => f.apiKey === apiKey);
-  if (!match) return null;
-  let raw = (ctx.formValues as any)[match.id];
-  raw = pickAnyLocaleValue(raw, ctx.locale);
-  if (!raw) return null;
-  if (Array.isArray(raw)) raw = raw[0];
-  if (raw?.upload_id) return raw;
-  if (raw?.upload?.id) return { upload_id: raw.upload.id };
-  if (typeof raw === 'string' && raw.startsWith('http')) return { __direct_url: raw };
-  return null;
-}
 
 function Alert({ children }: { children: React.ReactNode }) {
   return (
@@ -293,7 +316,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       const effectiveKey = opts?.fromApiKey ?? preferredApiKey;
       // Prefer the sibling inside the same block; optionally force top-level
-      let fileVal = getSiblingFileFromBlock(ctx, effectiveKey)
+      let fileVal = getSiblingFileFromBlock(ctx, effectiveKey);
       
       console.log(ctx, effectiveKey, 'opts');
       console.log(fileVal, 'fileVal')
