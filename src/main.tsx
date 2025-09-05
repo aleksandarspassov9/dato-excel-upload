@@ -165,7 +165,7 @@ function Alert({ children }: { children: React.ReactNode }) {
 /** ---------- Editor (block-only) ---------- */
 function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const params = getEditorParams(ctx);
-  const sourceApiKey = params.sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY;
+  const sourceApiKey = 'sourcefile';
 
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
