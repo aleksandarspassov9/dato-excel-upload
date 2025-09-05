@@ -292,7 +292,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setNotice(null);
 
       const effectiveKey = opts?.fromApiKey ?? preferredApiKey;
-
+      console.log(opts, 'opts')
       // Prefer the sibling inside the same block; optionally force top-level
       let fileVal = opts?.preferTopLevel
         ? getTopLevelFileValueByApiKey(ctx, effectiveKey)
