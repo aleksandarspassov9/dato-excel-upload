@@ -121,13 +121,15 @@ function getSiblingFileFromBlock(ctx: RenderFieldExtensionCtx, siblingApiKey: st
   if (!hit) return null;
   const { container } = hit;
 
+  console.log(hit, 'hit');
+
   // Quick path: if container has the apiKey directly
   if (Object.prototype.hasOwnProperty.call(container, siblingApiKey)) {
     const localized = pickAnyLocaleValue(container[siblingApiKey], ctx.locale);
     const norm = normalizeUploadLike(localized);
     if (norm) return norm;
   }
-
+  console.log('2222');
   // If not, many blocks store by **field id**.
   const allDefs = Object.values(ctx.fields) as any[];
   const siblingDef = allDefs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === siblingApiKey);
@@ -140,6 +142,8 @@ function getSiblingFileFromBlock(ctx: RenderFieldExtensionCtx, siblingApiKey: st
     }
   }
 
+  console.log('333');
+
   // Final fallback: scan keys and map each key -> field def (by id) to compare apiKeys.
   for (const k of Object.keys(container)) {
     const defById = (ctx.fields as any)[k] || allDefs.find((f: any) => String(f.id) === String(k));
@@ -150,6 +154,8 @@ function getSiblingFileFromBlock(ctx: RenderFieldExtensionCtx, siblingApiKey: st
     const norm = normalizeUploadLike(localized);
     if (norm) return norm;
   }
+
+  console.log('4444');
 
   return null;
 }
