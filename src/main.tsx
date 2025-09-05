@@ -187,6 +187,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setNotice(null);
 
       const fileVal = getSiblingFileFromBlock(ctx, sourceApiKey);
+      console.log(fileVal, 'fileVal')
       if (!fileVal) {
         setNotice(`No file found in this block’s "${sourceApiKey}" field. Upload an .xlsx/.xls/.csv there and try again.`);
         return;
