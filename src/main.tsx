@@ -297,7 +297,8 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       ? getTopLevelFileValueByApiKey(ctx, effectiveKey)
       : getSiblingFileFromBlock(ctx, effectiveKey) || getTopLevelFileValueByApiKey(ctx, effectiveKey);
       
-      console.log(ctx, effectiveKey, 'opts')
+      console.log(ctx, effectiveKey, 'opts');
+      console.log(opts, 'opts')
       
       if (!fileVal) {
         const blockList = blockSiblings.length
