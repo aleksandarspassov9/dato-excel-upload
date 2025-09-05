@@ -319,7 +319,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       let fileVal = getSiblingFileFromBlock(ctx, effectiveKey);
       
       console.log(ctx, effectiveKey, 'opts');
-      console.log(fileVal, 'fileVal')
+      console.log(fileVal, 'fileVal 2222')
       
       if (!fileVal) {
         const blockList = blockSiblings.length
