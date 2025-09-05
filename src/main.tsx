@@ -17,36 +17,43 @@ import 'datocms-react-ui/styles.css';
 
 /** =================== Config =================== */
 const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile';
+const PAYLOAD_SHAPE: 'matrix' | 'rows' = 'matrix'; // set 'rows' if your field expects { rows: [...] }
+const DEBUG = false; // set true to see console logs
 
-type TableRow = Record<string, unknown>;
-
+type TableRow = Record<string, string>;
 type FieldParams = {
-  sourceFileApiKey?: string;   // sibling file field api key (e.g. "sourcefile")
+  sourceFileApiKey?: string;   // e.g. "sourcefile"
   columnsMetaApiKey?: string;  // optional sibling json/text to write { columns }
   rowCountApiKey?: string;     // optional sibling number/text to write row count
 };
 
-/** If your JSON field expects { rows: [...] } instead of { columns, data }, set 'rows' */
-const PAYLOAD_SHAPE: 'matrix' | 'rows' = 'matrix';
+/** =================== Tiny utils =================== */
+const log = (...args: any[]) => { if (DEBUG) console.log('[excel-json-block]', ...args); };
 
-/** =================== Small utils =================== */
 function getEditorParams(ctx: RenderFieldExtensionCtx): FieldParams {
   const direct = (ctx.parameters as any) || {};
   if (direct && Object.keys(direct).length) return direct;
-
   const appearance =
     (ctx.field as any)?.attributes?.appearance?.parameters ||
     (ctx as any)?.fieldAppearance?.parameters ||
     {};
   return appearance;
 }
-
 function toStringValue(v: unknown): string {
   if (v === null || v === undefined) return '';
   if (typeof v === 'number' && Number.isNaN(v)) return '';
   return String(v);
 }
-
+function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
+  return (ctx.field as any)?.attributes?.field_type === 'json';
+}
+async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
+  const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
+  // Clear first to force a diff
+  await ctx.setFieldValue(ctx.fieldPath, null);
+  await Promise.resolve();
+  await ctx.setFieldValue(ctx.fieldPath, value);
+}
 function pickAnyLocaleValue(raw: any, locale?: string | null) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw ?? null;
   if (locale && Object.prototype.hasOwnProperty.call(raw, locale) && raw[locale]) return raw[locale];
@@ -54,54 +61,31 @@ function pickAnyLocaleValue(raw: any, locale?: string | null) {
   return null;
 }
 
-function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
-  return (ctx.field as any)?.attributes?.field_type === 'json';
-}
-
-async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
-  const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
-  // Clear first to ensure Dato detects a change
-  await ctx.setFieldValue(ctx.fieldPath, null);
-  await Promise.resolve();
-  await ctx.setFieldValue(ctx.fieldPath, value);
-}
-
-/** =================== Block helpers (strictly same block) =================== */
+/** =================== Path helpers (block-only) =================== */
 /**
- * Deep-scan formValues to find the container object that directly holds this field (by id or apiKey).
+ * Dissect the current fieldPath into: containerPath (array of segments),
+ * the key of the current field (by id), and whether a trailing locale segment was present.
  */
-function findBlockContainerWithCurrentField(ctx: RenderFieldExtensionCtx): { container: any; containerPath: string[] } | null {
-  const root = (ctx as any).formValues;
-  const cur: any = ctx.field;
-  const curId = String(cur?.id);
-  const curApi = cur?.apiKey ?? cur?.attributes?.api_key;
-
-  function walk(node: any, path: string[]): { container: any; containerPath: string[] } | null {
-    if (!node || typeof node !== 'object') return null;
-
-    if (Object.prototype.hasOwnProperty.call(node, curId) || (curApi && Object.prototype.hasOwnProperty.call(node, curApi))) {
-      return { container: node, containerPath: path };
-    }
-
-    if (Array.isArray(node)) {
-      for (let i = 0; i < node.length; i++) {
-        const r = walk(node[i], path.concat(String(i)));
-        if (r) return r;
-      }
-      return null;
-    }
-
-    for (const k of Object.keys(node)) {
-      const r = walk(node[k], path.concat(k));
-      if (r) return r;
-    }
-    return null;
+function dissectCurrentPath(ctx: RenderFieldExtensionCtx) {
+  const parts = String(ctx.fieldPath).split('.').filter(Boolean);
+  let localeWasSuffix = false;
+  if (ctx.locale && parts[parts.length - 1] === String(ctx.locale)) {
+    localeWasSuffix = true;
+    parts.pop(); // drop locale segment
   }
-
-  return walk(root, []);
+  const currentKey = parts.pop() || '';
+  const containerPath = parts; // array of segments
+  log('dissect', { fieldPath: ctx.fieldPath, containerPath, currentKey, localeWasSuffix });
+  return { containerPath, currentKey, localeWasSuffix };
 }
 
-/** Normalize Dato's upload-like value into a { upload_id } or { __direct_url } */
+/** Read a value from formValues via dotted path (supports arrays) */
+function getValueAt(root: any, dotted: string) {
+  const parts = dotted.split('.').filter(Boolean);
+  return parts.reduce((acc: any, seg) => (acc == null ? acc : acc[seg]), root);
+}
+
+/** Convert any upload-like to a normalized shape we can use */
 function normalizeUploadLike(raw: any) {
   if (!raw) return null;
   if (Array.isArray(raw)) raw = raw[0];
@@ -113,83 +97,56 @@ function normalizeUploadLike(raw: any) {
 }
 
 /**
- * Read the sibling file value (by apiKey) from the SAME block as dataJson.
- * Handles blocks that store child values by **id** or by **apiKey**.
+ * Resolve the sibling file value by building a path using the sibling field **id** (preferred) and
+ * optionally the apiKey as a fallback. This is the key change that avoids returning null.
  */
 function getSiblingFileFromBlock(ctx: RenderFieldExtensionCtx, siblingApiKey: string) {
-  const hit = findBlockContainerWithCurrentField(ctx);
-  if (!hit) return null;
-  const { container } = hit;
+  const { containerPath } = dissectCurrentPath(ctx);
+  const root = (ctx as any).formValues;
 
-  console.log(hit, 'hit');
-
-  // Quick path: if container has the apiKey directly
-  if (Object.prototype.hasOwnProperty.call(container, siblingApiKey)) {
-    const localized = pickAnyLocaleValue(container[siblingApiKey], ctx.locale);
-    const norm = normalizeUploadLike(localized);
-    if (norm) return norm;
-  }
-  console.log('2222');
-  // If not, many blocks store by **field id**.
+  // Find sibling field definition by apiKey (works both for block fields and globals)
   const allDefs = Object.values(ctx.fields) as any[];
   const siblingDef = allDefs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === siblingApiKey);
-  if (siblingDef) {
-    const idKey = String(siblingDef.id);
-    if (Object.prototype.hasOwnProperty.call(container, idKey)) {
-      const localized = pickAnyLocaleValue(container[idKey], ctx.locale);
-      const norm = normalizeUploadLike(localized);
-      if (norm) return norm;
-    }
+  const isLocalized = Boolean(siblingDef?.localized ?? siblingDef?.attributes?.localized);
+  const locSuffix = isLocalized && ctx.locale ? `.${ctx.locale}` : '';
+
+  // Prefer the ID path — blocks typically store by field id
+  if (siblingDef?.id) {
+    const idPath = [...containerPath, String(siblingDef.id)].join('.') + locSuffix;
+    const rawId = pickAnyLocaleValue(getValueAt(root, idPath), ctx.locale);
+    const normId = normalizeUploadLike(rawId);
+    log('try idPath', idPath, '→', normId ? 'found' : 'miss');
+    if (normId) return normId;
   }
 
-  console.log('333');
+  // Fallback: try apiKey path (some block editors keep apiKey)
+  const ak = siblingDef?.apiKey ?? siblingDef?.attributes?.api_key ?? siblingApiKey;
+  const akPath = [...containerPath, ak].join('.') + locSuffix;
+  const rawAk = pickAnyLocaleValue(getValueAt(root, akPath), ctx.locale);
+  const normAk = normalizeUploadLike(rawAk);
+  log('try akPath', akPath, '→', normAk ? 'found' : 'miss');
+  if (normAk) return normAk;
 
-  // Final fallback: scan keys and map each key -> field def (by id) to compare apiKeys.
-  for (const k of Object.keys(container)) {
-    const defById = (ctx.fields as any)[k] || allDefs.find((f: any) => String(f.id) === String(k));
-    const keyApi = defById ? (defById.apiKey ?? defById.attributes?.api_key) : k;
-    if (keyApi !== siblingApiKey) continue;
-
-    const localized = pickAnyLocaleValue(container[k], ctx.locale);
-    const norm = normalizeUploadLike(localized);
-    if (norm) return norm;
-  }
-
-  console.log('4444');
-
+  // Nothing found
   return null;
 }
 
 /**
- * Set a sibling field INSIDE the same block (supports id or apiKey storage + localization).
+ * Set a sibling field inside the same block using its field **id** path (with locale when needed).
+ * This avoids ambiguity and works even when the container stores children by id.
  */
 async function setSiblingInBlock(ctx: RenderFieldExtensionCtx, apiKey: string, value: any) {
-  const hit = findBlockContainerWithCurrentField(ctx);
-  if (!hit) return;
-  const { container, containerPath } = hit;
+  const { containerPath } = dissectCurrentPath(ctx);
+  const allDefs = Object.values(ctx.fields) as any[];
+  const def = allDefs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === apiKey);
+  if (!def?.id) return;
 
-  let foundKey: string | null = null;
-  let defForTarget: any = null;
+  const isLocalized = Boolean(def.localized ?? def.attributes?.localized);
+  const locSuffix = isLocalized && ctx.locale ? `.${ctx.locale}` : '';
+  const targetPath = [...containerPath, String(def.id)].join('.') + locSuffix;
 
-  if (Object.prototype.hasOwnProperty.call(container, apiKey)) {
-    foundKey = apiKey;
-    defForTarget = (Object.values(ctx.fields) as any[]).find((f: any) =>
-      (f.apiKey ?? f.attributes?.api_key) === apiKey
-    );
-  } else {
-    const defs = Object.values(ctx.fields) as any[];
-    const def = defs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === apiKey);
-    if (def && Object.prototype.hasOwnProperty.call(container, String(def.id))) {
-      foundKey = String(def.id);
-      defForTarget = def;
-    }
-  }
-  if (!foundKey) return;
-
-  const isLocalized = Boolean(defForTarget?.localized ?? defForTarget?.attributes?.localized);
-  const path = [...containerPath, foundKey, ...(isLocalized && ctx.locale ? [ctx.locale] : [])];
-
-  await ctx.setFieldValue(path.join('.'), value);
+  log('setSiblingInBlock', { apiKey, targetPath, isLocalized });
+  await ctx.setFieldValue(targetPath, value);
 }
 
 /** =================== Robust parsing (headerless-safe) =================== */
@@ -197,7 +154,6 @@ function aoaFromWorksheet(ws: XLSX.WorkSheet): any[][] {
   const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as any[][];
   return aoa.filter(row => row.some(cell => String(cell ?? '').trim() !== ''));
 }
-
 function normalizeAoA(aoa: any[][]) {
   const maxCols = Math.max(1, ...aoa.map(r => r.length));
   const columns = Array.from({ length: maxCols }, (_, i) => `column_${i + 1}`);
@@ -231,18 +187,10 @@ async function fetchUploadMeta(
   return null;
 }
 
-/** =================== UI bits =================== */
+/** =================== UI =================== */
 function Alert({ children }: { children: React.ReactNode }) {
   return (
-    <div
-      role="alert"
-      style={{
-        padding: '8px 12px',
-        border: '1px solid var(--border-color)',
-        borderRadius: 6,
-        marginTop: 8,
-      }}
-    >
+    <div role="alert" style={{ padding: '8px 12px', border: '1px solid var(--border-color)', borderRadius: 6, marginTop: 8 }}>
       {children}
     </div>
   );
@@ -262,6 +210,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setNotice(null);
 
       const fileVal = getSiblingFileFromBlock(ctx, sourceApiKey);
+      log('resolved sibling file', fileVal);
       if (!fileVal) {
         setNotice(`No file found in this block’s "${sourceApiKey}" field. Upload an .xlsx/.xls/.csv there and try again.`);
         return;
@@ -305,21 +254,11 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
           ? {
               columns: norm.columns,
               data: norm.rows.map((r) => norm.columns.map((c) => (r as any)[c] ?? '')),
-              meta: {
-                filename: meta.filename ?? null,
-                mime: meta.mime ?? null,
-                imported_at: new Date().toISOString(),
-                nonce: bust,
-              },
+              meta: { filename: meta.filename ?? null, mime: meta.mime ?? null, imported_at: new Date().toISOString(), nonce: bust },
             }
           : {
               rows: norm.rows,
-              meta: {
-                filename: meta.filename ?? null,
-                mime: meta.mime ?? null,
-                imported_at: new Date().toISOString(),
-                nonce: bust,
-              },
+              meta: { filename: meta.filename ?? null, mime: meta.mime ?? null, imported_at: new Date().toISOString(), nonce: bust },
             };
 
       await writePayload(ctx, payloadObj);
@@ -401,13 +340,10 @@ function Config({ ctx }: { ctx: any }) {
         onChange={setToken}
       />
       <div style={{ marginTop: 8 }}>
-        <Button
-          buttonType="primary"
-          onClick={async () => {
-            await ctx.updatePluginParameters({ cmaToken: token });
-            ctx.notice('Saved plugin configuration.');
-          }}
-        >
+        <Button buttonType="primary" onClick={async () => {
+          await ctx.updatePluginParameters({ cmaToken: token });
+          ctx.notice('Saved plugin configuration.');
+        }}>
           Save configuration
         </Button>
       </div>
@@ -420,7 +356,6 @@ connect({
   renderConfigScreen(ctx) {
     ReactDOM.createRoot(document.getElementById('root')!).render(<Config ctx={ctx} />);
   },
-
   manualFieldExtensions() {
     return [{
       id: 'excelJsonUploaderBlockOnly',
@@ -434,7 +369,6 @@ connect({
       ],
     }];
   },
-
   renderFieldExtension(id, ctx) {
     if (id === 'excelJsonUploaderBlockOnly') {
       ReactDOM.createRoot(document.getElementById('root')!).render(<Uploader ctx={ctx} />);
