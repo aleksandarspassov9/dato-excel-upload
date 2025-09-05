@@ -17,7 +17,7 @@ import * as XLSX from 'xlsx';
 import 'datocms-react-ui/styles.css';
 
 // ======= Config / fallbacks =======
-const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile'; // change to your usual file field key
+const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile';
 
 type TableRow = Record<string, unknown>;
 
@@ -50,48 +50,26 @@ function getEditorParams(ctx: RenderFieldExtensionCtx): FieldParams {
   return appearance;
 }
 
-/** Field IDs that belong to the **current item type** */
-function fieldIdsOnCurrentItem(ctx: RenderFieldExtensionCtx): Set<string> {
-  // Prefer itemType relationship if available (most accurate)
-  const idsFromItemType: string[] =
-    (ctx as any)?.itemType?.relationships?.fields?.data?.map((d: any) => String(d.id)) || [];
-  if (idsFromItemType.length) return new Set(idsFromItemType);
-
-  // Fallback: derive from formValues keys
-  const keys = Object.keys((ctx as any).formValues || {});
-  // Keys are typically plain field IDs; if they ever include ".locale", strip it:
-  return new Set(keys.map((k) => String(k).split('.')[0]));
+function toStringValue(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'number' && Number.isNaN(v)) return '';
+  return String(v);
 }
 
-/** File fields on the **current item type** only */
-function listFileFieldsOnItem(ctx: RenderFieldExtensionCtx) {
-  const allowed = fieldIdsOnCurrentItem(ctx);
-  const all = Object.values(ctx.fields) as any[];
-  return all
-    .filter((f) => allowed.has(String(f.id)))
-    .filter((f) => (f.fieldType ?? f.attributes?.field_type) === 'file')
-    .map((f) => ({
-      id: String(f.id),
-      apiKey: f.apiKey ?? f.attributes?.api_key,
-      label: f.label ?? f.attributes?.label,
-    }));
-}
-
-/** Resolve a field ID for a given apiKey **on the current item type only** */
-function resolveFieldIdOnItem(
-  ctx: RenderFieldExtensionCtx,
-  preferred?: string | null,
-): string | null {
-  if (!preferred) return null;
-  const list = listFileFieldsOnItem(ctx);
-
-  // If the caller passed a numeric/string ID directly and it's on this item, accept it
-  const asId = String(preferred);
-  if (list.some((f) => f.id === asId)) return asId;
-
-  // Else match by apiKey among current item's fields
-  const match = list.find((f) => f.apiKey === preferred);
-  return match?.id ?? null;
+function normalizeSheetRowsStrings(rows: TableRow[]): { rows: TableRow[]; columns: string[] } {
+  if (!rows || rows.length === 0) return { rows: [], columns: [] };
+  const firstRow = rows[0] as Record<string, unknown>;
+  const colCount = Math.max(1, Object.keys(firstRow).length);
+  const safe = Array.from({ length: colCount }, (_, i) => `column_${i + 1}`);
+  const normalizedRows = rows.map((r) => {
+    const values = Object.values(r);
+    const out: Record<string, string> = {};
+    safe.forEach((col, i) => {
+      out[col] = toStringValue(values[i]);
+    });
+    return out;
+  });
+  return { rows: normalizedRows, columns: safe };
 }
 
 function pickAnyLocaleValue(raw: any, locale?: string | null) {
@@ -103,6 +81,17 @@ function pickAnyLocaleValue(raw: any, locale?: string | null) {
     if (raw[k]) return raw[k];
   }
   return null;
+}
+
+function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
+  return (ctx.field as any)?.attributes?.field_type === 'json';
+}
+
+async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
+  const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
+  await ctx.setFieldValue(ctx.fieldPath, null);
+  await Promise.resolve();
+  await ctx.setFieldValue(ctx.fieldPath, value);
 }
 
 async function fetchUploadMeta(
@@ -134,40 +123,110 @@ async function fetchUploadMeta(
   return null;
 }
 
-function toStringValue(v: unknown): string {
-  if (v === null || v === undefined) return '';
-  if (typeof v === 'number' && Number.isNaN(v)) return '';
-  return String(v);
+// ---- Path helpers (to navigate inside a block) ----
+function splitPath(path: string): string[] {
+  return path.split('.').filter(Boolean);
+}
+function parentPath(path: string): string {
+  const segs = splitPath(path);
+  return segs.slice(0, -1).join('.');
+}
+function getAtPath(root: any, path: string) {
+  return splitPath(path).reduce((acc: any, seg) => (acc ? acc[seg] : undefined), root);
 }
 
-function normalizeSheetRowsStrings(rows: TableRow[]): { rows: TableRow[]; columns: string[] } {
-  if (!rows || rows.length === 0) return { rows: [], columns: [] };
+/**
+ * From the parent (block) container at ctx.fieldPath's parent, find a sibling field by API key.
+ * Returns { id, value } where value is the localized value.
+ */
+function findSiblingFileInSameBlock(ctx: RenderFieldExtensionCtx, siblingApiKey: string):
+  | { id: string; value: any }
+  | null {
+  const parent = parentPath(ctx.fieldPath);
+  const container = getAtPath((ctx as any).formValues, parent);
+  if (!container || typeof container !== 'object') return null;
 
-  const firstRow = rows[0] as Record<string, unknown>;
-  const colCount = Math.max(1, Object.keys(firstRow).length);
-  const safe = Array.from({ length: colCount }, (_, i) => `column_${i + 1}`);
-
-  const normalizedRows = rows.map((r) => {
-    const values = Object.values(r);
-    const out: Record<string, string> = {};
-    safe.forEach((col, i) => {
-      out[col] = toStringValue(values[i]);
-    });
-    return out;
-  });
-
-  return { rows: normalizedRows, columns: safe };
+  // Keys at this level should be child field IDs (strings)
+  for (const key of Object.keys(container)) {
+    const fieldDef = (ctx.fields as any)[key];
+    if (!fieldDef) continue;
+    const apiKey = fieldDef.apiKey ?? fieldDef.attributes?.api_key;
+    const type = fieldDef.fieldType ?? fieldDef.attributes?.field_type;
+    if (apiKey === siblingApiKey && type === 'file') {
+      const raw = container[key];
+      const localized = pickAnyLocaleValue(raw, ctx.locale);
+      return { id: key, value: localized };
+    }
+  }
+  return null;
 }
 
-function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
-  return (ctx.field as any)?.attributes?.field_type === 'json';
+/** File fields on THIS block (siblings) for assist UI */
+function listBlockFileSiblings(ctx: RenderFieldExtensionCtx) {
+  const parent = parentPath(ctx.fieldPath);
+  const container = getAtPath((ctx as any).formValues, parent);
+  if (!container || typeof container !== 'object') return [];
+  const out: Array<{ id: string; apiKey: string; hasValue: boolean; preview: string }> = [];
+  for (const key of Object.keys(container)) {
+    const fieldDef = (ctx.fields as any)[key];
+    if (!fieldDef) continue;
+    const apiKey = fieldDef.apiKey ?? fieldDef.attributes?.api_key;
+    const type = fieldDef.fieldType ?? fieldDef.attributes?.field_type;
+    if (type !== 'file') continue;
+
+    const val = pickAnyLocaleValue(container[key], ctx.locale);
+    let hasValue = false;
+    let preview = '';
+    if (val) {
+      hasValue = true;
+      if (Array.isArray(val) && val.length > 0) {
+        const v0 = val[0];
+        preview = v0?.upload_id ?? v0?.upload?.id ?? (typeof v0 === 'string' ? v0 : '[array]');
+      } else if (val?.upload_id || val?.upload?.id) {
+        preview = val.upload_id ?? val.upload?.id;
+      } else if (typeof val === 'string') {
+        preview = val;
+      } else {
+        preview = '[object]';
+      }
+    }
+    out.push({ id: key, apiKey, hasValue, preview });
+  }
+  return out;
 }
 
-async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
-  const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
-  await ctx.setFieldValue(ctx.fieldPath, null);
-  await Promise.resolve();
-  await ctx.setFieldValue(ctx.fieldPath, value);
+/** Top-level file fields on the page item (fallback/assist) */
+function listTopLevelFileFields(ctx: RenderFieldExtensionCtx) {
+  const all = Object.values(ctx.fields) as any[];
+  // try restricting to current item type if available
+  const allowedIds: Set<string> = new Set(
+    ((ctx as any)?.itemType?.relationships?.fields?.data || []).map((d: any) => String(d.id)),
+  );
+  const onItem = allowedIds.size
+    ? all.filter((f) => allowedIds.has(String(f.id)))
+    : all;
+
+  return onItem
+    .filter((f) => (f.fieldType ?? f.attributes?.field_type) === 'file')
+    .map((f) => ({
+      id: String(f.id),
+      apiKey: f.apiKey ?? f.attributes?.api_key,
+      label: f.label ?? f.attributes?.label,
+    }));
+}
+
+function getTopLevelFileValueByApiKey(ctx: RenderFieldExtensionCtx, apiKey: string) {
+  const list = listTopLevelFileFields(ctx);
+  const match = list.find((f) => f.apiKey === apiKey);
+  if (!match) return null;
+  let raw = (ctx.formValues as any)[match.id];
+  raw = pickAnyLocaleValue(raw, ctx.locale);
+  if (!raw) return null;
+  if (Array.isArray(raw)) raw = raw[0];
+  if (raw?.upload_id) return raw;
+  if (raw?.upload?.id) return { upload_id: raw.upload.id };
+  if (typeof raw === 'string' && raw.startsWith('http')) return { __direct_url: raw };
+  return null;
 }
 
 function Alert({ children }: { children: React.ReactNode }) {
@@ -186,7 +245,7 @@ function Alert({ children }: { children: React.ReactNode }) {
   );
 }
 
-// ======= Minimal uploader (with on-item field filtering + assist UI) =======
+// ======= Minimal uploader (block-aware) =======
 function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const params = getEditorParams(ctx);
   const preferredApiKey =
@@ -199,73 +258,53 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const [sheetNames, setSheetNames] = useState<string[]>([]);
   const [selectedMeta, setSelectedMeta] = useState<{ filename: string | null, mime: string | null } | null>(null);
 
-  // File fields **on this item** and whether they currently have a value (any locale)
-  const detectedFileFields = useMemo(() => {
-    const candidates = listFileFieldsOnItem(ctx);
-    return candidates.map((f) => {
-      const raw = (ctx.formValues as any)[f.id];
-      const val = pickAnyLocaleValue(raw, ctx.locale);
-      let hasValue = false;
-      let preview = '';
-      if (val) {
-        hasValue = true;
-        if (Array.isArray(val) && val.length > 0) {
-          const v0 = val[0];
-          preview = v0?.upload_id ?? v0?.upload?.id ?? (typeof v0 === 'string' ? v0 : '[array]');
-        } else if (val?.upload_id || val?.upload?.id) {
-          preview = val.upload_id ?? val.upload?.id;
-        } else if (typeof val === 'string') {
-          preview = val;
-        } else {
-          preview = '[object]';
-        }
-      }
-      return { ...f, hasValue, preview };
-    });
-  }, [ctx.fields, ctx.formValues, ctx.locale]);
+  const blockSiblings = useMemo(() => listBlockFileSiblings(ctx), [ctx.fieldPath, ctx.formValues, ctx.locale, ctx.fields]);
+  const topLevelFiles = useMemo(() => listTopLevelFileFields(ctx), [ctx.fields, ctx.formValues, ctx.locale]);
 
-  function getFileFieldValueFrom(apiKey: string | null) {
+  function getFileValueFromBlock(apiKey: string | null) {
     if (!apiKey) return null;
-    const fileFieldId = resolveFieldIdOnItem(ctx, apiKey);
-    if (!fileFieldId) return null;
-
-    let raw = (ctx.formValues as any)[fileFieldId];
-    raw = pickAnyLocaleValue(raw, ctx.locale);
-    if (!raw) return null;
-
-    if (Array.isArray(raw)) raw = raw[0];
-    if (raw?.upload_id) return raw;
-    if (raw?.upload?.id) return { upload_id: raw.upload.id };
-    if (typeof raw === 'string' && raw.startsWith('http')) return { __direct_url: raw };
-    return null;
+    const hit = findSiblingFileInSameBlock(ctx, apiKey);
+    return hit?.value ?? null;
   }
 
-  async function importFromSource(overrideApiKey?: string) {
+  function getFileValueFromTopLevel(apiKey: string | null) {
+    if (!apiKey) return null;
+    return getTopLevelFileValueByApiKey(ctx, apiKey);
+  }
+
+  async function importFromSource(opts?: { fromApiKey?: string; preferTopLevel?: boolean }) {
     try {
       setBusy(true);
       setNotice(null);
 
-      const effectiveApiKey = overrideApiKey ?? preferredApiKey;
-      const fileVal = getFileFieldValueFrom(effectiveApiKey);
+      const effectiveKey = opts?.fromApiKey ?? preferredApiKey;
+
+      // 1) prefer BLOCK sibling (same block) unless explicitly told to use top-level
+      let fileVal = opts?.preferTopLevel
+        ? getFileValueFromTopLevel(effectiveKey)
+        : getFileValueFromBlock(effectiveKey) || getFileValueFromTopLevel(effectiveKey);
 
       if (!fileVal) {
-        const onItem = listFileFieldsOnItem(ctx);
-        const extras = onItem.length
-          ? `Detected file fields on this item: ${onItem
-              .map((f) => `${f.apiKey}${detectedFileFields.find(df => df.id === f.id)?.hasValue ? ' (has value)' : ''}`)
-              .join(', ')}.`
-          : 'No file fields detected on this item.';
+        const blockList = blockSiblings.length
+          ? `Block file fields: ${blockSiblings.map(b => `${b.apiKey}${b.hasValue ? ' (has value)' : ''}`).join(', ')}. `
+          : 'No file fields found in this block. ';
+        const pageList = topLevelFiles.length
+          ? `Page file fields: ${topLevelFiles.map(f => f.apiKey).join(', ')}.`
+          : 'No file fields found on the page.';
         setNotice(
-          `No file found in the field "${effectiveApiKey}". ${extras} ` +
-          'Upload your spreadsheet to that exact field (and locale), or click "Import from this field" next to a field that has a value.',
+          `No file found for API key "${effectiveKey}" in this block or page. ` +
+          blockList + pageList +
+          ' Upload your spreadsheet to the block’s file field (same block as this dataJson), ' +
+          'or click one of the buttons below to import from an existing populated field.',
         );
         return;
       }
 
+      // 2) resolve URL/meta
       const token = (ctx.plugin.attributes.parameters as any)?.cmaToken || '';
       const meta = await fetchUploadMeta(fileVal, token);
       if (!meta?.url) {
-        setNotice('Could not resolve upload URL from the file field value. Add a CMA token with "Uploads: read" in the plugin config, or use a direct URL value.');
+        setNotice('Could not resolve upload URL. Add a CMA token with "Uploads: read" in the plugin config, or use a direct URL value.');
         return;
       }
       setSelectedMeta({ filename: meta.filename, mime: meta.mime_type });
@@ -275,6 +314,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
         return;
       }
 
+      // 3) fetch + parse
       const bust = Date.now();
       const url = meta.url + (meta.url.includes('?') ? '&' : '?') + `cb=${bust}`;
       const res = await fetch(url, { cache: 'no-store' });
@@ -305,27 +345,19 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       const payloadObj = {
         columns: normalized.columns,
-        data: normalized.rows.map((r) =>
-          normalized.columns.map((c) => (r as any)[c] ?? ''),
-        ),
+        data: normalized.rows.map((r) => normalized.columns.map((c) => (r as any)[c] ?? '')),
         meta: {
           filename: meta.filename ?? null,
           mime_type: meta.mime_type ?? null,
           imported_at: new Date().toISOString(),
           nonce: bust,
-          source_field_api_key: effectiveApiKey,
+          source_field_api_key: effectiveKey,
         },
       };
 
       await writePayload(ctx, payloadObj);
 
-      if (params.columnsMetaApiKey) {
-        await setFieldByApiOrId(ctx, params.columnsMetaApiKey, { columns: normalized.columns });
-      }
-      if (params.rowCountApiKey) {
-        await setFieldByApiOrId(ctx, params.rowCountApiKey, Number(normalized.rows.length));
-      }
-
+      // persist if possible
       if (typeof (ctx as any).saveCurrentItem === 'function') {
         await (ctx as any).saveCurrentItem();
       }
@@ -336,17 +368,6 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     } finally {
       setBusy(false);
     }
-  }
-
-  async function setFieldByApiOrId(ctx: RenderFieldExtensionCtx, apiKeyOrId: string, value: unknown) { const path = getFieldPath(ctx, apiKeyOrId); if (path) await ctx.setFieldValue(path, value); }
-  
-  function getFieldPath(ctx: RenderFieldExtensionCtx, apiKeyOrId: string): string | null {
-    const fields = Object.values(ctx.fields) as any[];
-    const byId = (ctx.fields as any)[apiKeyOrId];
-    const id =
-      byId?.id ?? (fields.find(f => (f.apiKey ?? f.attributes?.api_key) === apiKeyOrId)?.id);
-    if (!id) return null;
-    return ctx.locale ? `${id}.${ctx.locale}` : id;
   }
 
   async function saveAndPublish() {
@@ -387,7 +408,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     }
   }
 
-  // Keep local state in sync if something else writes to this field (optional)
+  // reflect external updates (optional)
   useEffect(() => {
     const initial = (ctx.formValues as any)[ctx.fieldPath];
     try {
@@ -404,10 +425,6 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     }
   }, [ctx.fieldPath, ctx.formValues]);
 
-  const onItemFileFields = listFileFieldsOnItem(ctx);
-  const configuredFieldId = resolveFieldIdOnItem(ctx, preferredApiKey);
-  const configuredFieldExists = !!configuredFieldId;
-
   return (
     <Canvas ctx={ctx}>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -417,56 +434,65 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
         <Button onClick={saveAndPublish} disabled={busy} buttonType="primary">
           Save & Publish
         </Button>
-        <Button
-          onClick={async () => {
-            await ctx.setFieldValue(ctx.fieldPath, null);
-            await Promise.resolve();
-            await importFromSource();
-          }}
-          disabled={busy}
-          buttonType="muted"
-        >
-          Force re-import
-        </Button>
       </div>
 
       {busy && <Spinner />}
 
-      {/* Assist panel: shows only file fields that belong to this item */}
-      <div style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
-        <div>
-          Configured file field API key: <code>{preferredApiKey}</code>{' '}
-          {!configuredFieldExists && <strong>(not found on this item type)</strong>}
-        </div>
+      {/* Assist panel: block-level and page-level file fields */}
+      <div style={{ marginTop: 12, fontSize: 12, opacity: 0.9 }}>
+        <div>Configured file field API key for this block: <code>{preferredApiKey}</code></div>
         <div>Current locale: <code>{String(ctx.locale || 'default')}</code></div>
-        {onItemFileFields.length > 0 ? (
-          <div style={{ marginTop: 6 }}>
-            File fields on this item:
+
+        <div style={{ marginTop: 8 }}>
+          <strong>Block file fields (siblings in this block):</strong>
+          {blockSiblings.length ? (
             <ul style={{ margin: '6px 0 0 16px' }}>
-              {detectedFileFields.map((f) => (
-                <li key={f.id}>
-                  <code>{f.apiKey}</code> — {f.hasValue ? 'has value ✓' : 'empty'}
-                  {f.preview ? ` (preview: ${String(f.preview).slice(0, 40)}…)` : ''}
-                  {f.hasValue && (
+              {blockSiblings.map((b) => (
+                <li key={b.id}>
+                  <code>{b.apiKey}</code> — {b.hasValue ? 'has value ✓' : 'empty'}
+                  {b.preview ? ` (preview: ${String(b.preview).slice(0, 40)}…)` : ''}
+                  {b.hasValue && (
                     <Button
                       buttonSize="xs"
                       buttonType="muted"
                       style={{ marginLeft: 8 }}
-                      onClick={() => importFromSource(f.apiKey)}
+                      onClick={() => importFromSource({ fromApiKey: b.apiKey })}
                       disabled={busy}
                     >
-                      Import from this field
+                      Import from this block field
                     </Button>
                   )}
                 </li>
               ))}
             </ul>
-          </div>
-        ) : (
-          <div style={{ marginTop: 6 }}>
-            No file fields detected on this item. Add a single-asset file field to this model and set its API key in the editor parameters.
-          </div>
-        )}
+          ) : (
+            <div style={{ marginTop: 4 }}>No file fields found inside this block.</div>
+          )}
+        </div>
+
+        <div style={{ marginTop: 8 }}>
+          <strong>Page file fields (top-level fallback):</strong>
+          {topLevelFiles.length ? (
+            <ul style={{ margin: '6px 0 0 16px' }}>
+              {topLevelFiles.map((f) => (
+                <li key={f.id}>
+                  <code>{f.apiKey}</code>
+                  <Button
+                    buttonSize="xs"
+                    buttonType="muted"
+                    style={{ marginLeft: 8 }}
+                    onClick={() => importFromSource({ fromApiKey: f.apiKey, preferTopLevel: true })}
+                    disabled={busy}
+                  >
+                    Import from page field
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div style={{ marginTop: 4 }}>No file fields detected on the page item.</div>
+          )}
+        </div>
       </div>
 
       {sheetNames.length > 0 && (
@@ -523,7 +549,7 @@ connect({
         type: 'editor',
         fieldTypes: ['json', 'text'],
         parameters: [
-          { id: 'sourceFileApiKey', name: 'Source File API key', type: 'string', required: true },
+          { id: 'sourceFileApiKey', name: 'Source File API key (block sibling)', type: 'string', required: true },
           { id: 'columnsMetaApiKey', name: 'Columns Meta API key', type: 'string' },
           { id: 'rowCountApiKey', name: 'Row Count API key', type: 'string' },
         ],
@@ -544,10 +570,10 @@ if (window.self === window.top) {
     <div style={{ padding: 16 }}>
       <h3>Plugin dev harness</h3>
       <p>
-        Attach this as the Field editor for your <code>dataJson</code> (JSON or Text) field.
+        Attach this as the Field editor for your block’s <code>dataJson</code> (JSON or Text) field.
       </p>
       <p>
-        Configure the correct file field via the "Source File API key" parameter (or add <code>?fileApiKey=…</code>).
+        Set the parameter <strong>Source File API key</strong> to the block’s file field API key (e.g. <code>sourcefile</code>).
       </p>
     </div>,
   );
