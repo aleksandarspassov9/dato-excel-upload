@@ -21,12 +21,9 @@ const DEFAULT_SOURCE_FILE_API_KEY = 'sourcefile';
 type TableRow = Record<string, unknown>;
 
 type FieldParams = {
-  /** Sibling file field api key inside the same block (e.g. "sourcefile") */
-  sourceFileApiKey?: string;
-  /** Optional sibling field (json/text) to store { columns } */
-  columnsMetaApiKey?: string;
-  /** Optional sibling field (number/text) to store row count */
-  rowCountApiKey?: string;
+  sourceFileApiKey?: string;   // sibling file field api key (e.g. "sourcefile")
+  columnsMetaApiKey?: string;  // optional sibling json/text to write { columns }
+  rowCountApiKey?: string;     // optional sibling number/text to write row count
 };
 
 /** If your JSON field expects { rows: [...] } instead of { columns, data }, set 'rows' */
@@ -69,10 +66,14 @@ async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
   await ctx.setFieldValue(ctx.fieldPath, value);
 }
 
+/** =================== Block helpers (strictly same block) =================== */
+function splitPath(p: string) { return p.split('.').filter(Boolean); }
+function getAtPath(root: any, path: string[]) {
+  return path.reduce((acc: any, seg) => (acc ? acc[seg] : undefined), root);
+}
 
 /**
- * Find the container object (and its path) in formValues that actually holds this field.
- * We deep-scan formValues and stop at the first object that has our current field id/apiKey as a direct key.
+ * Deep-scan formValues to find the container object that directly holds this field (by id or apiKey).
  */
 function findBlockContainerWithCurrentField(ctx: RenderFieldExtensionCtx): { container: any; containerPath: string[] } | null {
   const root = (ctx as any).formValues;
@@ -118,51 +119,63 @@ function normalizeUploadLike(raw: any) {
 
 /**
  * Read the sibling file value (by apiKey) from the SAME block as dataJson.
- * Works whether the block stores children by field id or by apiKey.
+ * Handles blocks that store child values by **id** or by **apiKey**.
  */
 function getSiblingFileFromBlock(ctx: RenderFieldExtensionCtx, siblingApiKey: string) {
   const hit = findBlockContainerWithCurrentField(ctx);
   if (!hit) return null;
   const { container } = hit;
 
-  // Scan actual keys present in this block instance.
-  // For each key: resolve its apiKey via ctx.fields when the key is an id; otherwise use the key itself.
-  let resolvedKey: string | null = null;
-  for (const k of Object.keys(container)) {
-    const def: any = (ctx.fields as any)[k];
-    const keyApi = def ? (def.apiKey ?? def.attributes?.api_key) : k;
-    if (keyApi === siblingApiKey) {
-      resolvedKey = k;
-      break;
+  // Quick path: if container has the apiKey directly
+  if (Object.prototype.hasOwnProperty.call(container, siblingApiKey)) {
+    const localized = pickAnyLocaleValue(container[siblingApiKey], ctx.locale);
+    const norm = normalizeUploadLike(localized);
+    if (norm) return norm;
+  }
+
+  // If not, many blocks store by **field id**.
+  const allDefs = Object.values(ctx.fields) as any[];
+  const siblingDef = allDefs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === siblingApiKey);
+  if (siblingDef) {
+    const idKey = String(siblingDef.id);
+    if (Object.prototype.hasOwnProperty.call(container, idKey)) {
+      const localized = pickAnyLocaleValue(container[idKey], ctx.locale);
+      const norm = normalizeUploadLike(localized);
+      if (norm) return norm;
     }
   }
-  if (!resolvedKey) return null;
 
-  const localized = pickAnyLocaleValue(container[resolvedKey], ctx.locale);
-  return normalizeUploadLike(localized);
+  // Final fallback: scan keys and map each key -> field def (by id) to compare apiKeys.
+  for (const k of Object.keys(container)) {
+    const defById = (ctx.fields as any)[k] || allDefs.find((f: any) => String(f.id) === String(k));
+    const keyApi = defById ? (defById.apiKey ?? defById.attributes?.api_key) : k;
+    if (keyApi !== siblingApiKey) continue;
+
+    const localized = pickAnyLocaleValue(container[k], ctx.locale);
+    const norm = normalizeUploadLike(localized);
+    if (norm) return norm;
+  }
+
+  return null;
 }
 
 /**
- * Set a sibling field INSIDE the same block.
- * Tries apiKey first, then resolves by field id if needed, and respects localization.
+ * Set a sibling field INSIDE the same block (supports id or apiKey storage + localization).
  */
 async function setSiblingInBlock(ctx: RenderFieldExtensionCtx, apiKey: string, value: any) {
   const hit = findBlockContainerWithCurrentField(ctx);
   if (!hit) return;
   const { container, containerPath } = hit;
 
-  // Find the actual key in the container corresponding to this apiKey
   let foundKey: string | null = null;
   let defForTarget: any = null;
 
-  // Try direct apiKey
   if (Object.prototype.hasOwnProperty.call(container, apiKey)) {
     foundKey = apiKey;
     defForTarget = (Object.values(ctx.fields) as any[]).find((f: any) =>
       (f.apiKey ?? f.attributes?.api_key) === apiKey
     );
   } else {
-    // Resolve by field id
     const defs = Object.values(ctx.fields) as any[];
     const def = defs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === apiKey);
     if (def && Object.prototype.hasOwnProperty.call(container, String(def.id))) {
@@ -175,15 +188,12 @@ async function setSiblingInBlock(ctx: RenderFieldExtensionCtx, apiKey: string, v
   const isLocalized = Boolean(defForTarget?.localized ?? defForTarget?.attributes?.localized);
   const path = [...containerPath, foundKey, ...(isLocalized && ctx.locale ? [ctx.locale] : [])];
 
-  // Write
   await ctx.setFieldValue(path.join('.'), value);
 }
 
 /** =================== Robust parsing (headerless-safe) =================== */
 function aoaFromWorksheet(ws: XLSX.WorkSheet): any[][] {
-  // header:1 -> array-of-arrays, defval:'' -> keep empty cells
   const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as any[][];
-  // drop completely blank rows
   return aoa.filter(row => row.some(cell => String(cell ?? '').trim() !== ''));
 }
 
@@ -209,11 +219,7 @@ async function fetchUploadMeta(
     if (!cmaToken) return null;
     const client = buildClient({ apiToken: cmaToken });
     const upload: any = await client.uploads.find(String(fileFieldValue.upload_id));
-    return {
-      url: upload?.url || null,
-      mime: upload?.mime_type ?? null,
-      filename: upload?.filename ?? null,
-    };
+    return { url: upload?.url || null, mime: upload?.mime_type ?? null, filename: upload?.filename ?? null };
   }
   if (fileFieldValue?.__direct_url) {
     const url: string = fileFieldValue.__direct_url;
@@ -246,8 +252,6 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const params = getEditorParams(ctx);
   const sourceApiKey = params.sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY;
 
-  console.log(sourceApiKey, 'sourceApiKey')
-
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -278,7 +282,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       const res = await fetch(meta.url + (meta.url.includes('?') ? '&' : '?') + `cb=${bust}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
 
-      // Parse as AoA (works with/without headers), then normalize
+      // Parse → normalize
       const ct = res.headers.get('content-type') || meta.mime || '';
       let aoa: any[][];
       if (ct.includes('csv')) {
@@ -319,7 +323,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       await writePayload(ctx, payloadObj);
 
-      // Optional: write sibling meta fields inside this same block
+      // Optional sibling meta inside this block
       if (params.columnsMetaApiKey && PAYLOAD_SHAPE === 'matrix') {
         await setSiblingInBlock(ctx, params.columnsMetaApiKey, { columns: norm.columns });
       }
@@ -344,7 +348,6 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       setBusy(true);
       setNotice(null);
 
-      // Persist current item
       if (typeof (ctx as any).saveCurrentItem === 'function') {
         await (ctx as any).saveCurrentItem();
       }
@@ -366,7 +369,6 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     }
   }
 
-  // we don't render a table preview; nothing to sync visually
   useEffect(() => {}, [ctx.fieldPath, ctx.formValues]);
 
   return (
