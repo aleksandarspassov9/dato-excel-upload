@@ -69,8 +69,7 @@ function fieldExpectsJsonObject(ctx: RenderFieldExtensionCtx) {
   return (ctx.field as any)?.attributes?.field_type === 'json';
 }
 async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
-  console.log(payloadObj, 'payloadObj')
-  const value = fieldExpectsJsonObject(ctx) ? payloadObj : JSON.stringify(payloadObj);
+  const value = JSON.stringify(payloadObj);
   await ctx.setFieldValue(ctx.fieldPath, null);
   await Promise.resolve();
   await ctx.setFieldValue(ctx.fieldPath, value);
@@ -297,6 +296,8 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       let fileVal = opts?.preferTopLevel
       ? getTopLevelFileValueByApiKey(ctx, effectiveKey)
       : getSiblingFileFromBlock(ctx, effectiveKey) || getTopLevelFileValueByApiKey(ctx, effectiveKey);
+      
+      console.log(ctx, effectiveKey, 'opts')
       
       if (!fileVal) {
         const blockList = blockSiblings.length
