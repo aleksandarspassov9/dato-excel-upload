@@ -1,5 +1,5 @@
 // src/main.tsx
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import {
   connect,
@@ -7,7 +7,6 @@ import {
 } from 'datocms-plugin-sdk';
 import {
   Canvas,
-  Button,
   TextField,
   Spinner,
 } from 'datocms-react-ui';
@@ -168,7 +167,7 @@ function getSiblingFileFromBlock(ctx: RenderFieldExtensionCtx, siblingApiKey: st
   return null;
 }
 
-/** =================== Robust parsing (headerless-safe) =================== */
+/** =================== Parsing =================== */
 function aoaFromWorksheet(ws: XLSX.WorkSheet): any[][] {
   const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as any[][];
   return aoa.filter(row => row.some(cell => String(cell ?? '').trim() !== ''));
@@ -180,7 +179,6 @@ function slugHeader(raw: unknown, fallback: string) {
   if (!s) return fallback;
   // keep letters, numbers, spaces, underscores, dashes; collapse whitespace to single _
   s = s.replace(/[^\p{L}\p{N}\s_-]+/gu, '').trim().replace(/\s+/g, '_');
-  // avoid leading digits and stray underscores
   s = s.replace(/^_+/, '');
   if (/^\d/.test(s) || !s) return fallback;
   return s;
@@ -194,26 +192,19 @@ function makeUnique(names: string[]) {
     return count === 1 ? base : `${base}_${count}`;
   });
 }
-/**
- * Uses the FIRST ROW as headers. Ensures unique, non-empty column names.
- * If there are more cells than headers, adds fallback names.
- */
 function normalizeAoA(aoa: any[][]) {
   if (!aoa.length) return { rows: [], columns: [] };
 
   const header = aoa[0] ?? [];
   const body = aoa.slice(1);
 
-  // Start with header-derived names (fallbacks for empties)
   let columns = header.map((h, i) => slugHeader(h, `column_${i + 1}`));
 
-  // If any data rows are wider, extend columns with fallbacks
   const maxCols = Math.max(columns.length, ...body.map((r) => r.length), 1);
   while (columns.length < maxCols) {
     columns.push(`column_${columns.length + 1}`);
   }
 
-  // Ensure uniqueness (handles duplicates in header)
   columns = makeUnique(columns);
 
   const rows: TableRow[] = body.map((r) => {
@@ -256,7 +247,7 @@ function Alert({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** =================== Editor (block-only) =================== */
+/** =================== Editor (block-only, auto-import) =================== */
 function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const params = getEditorParams(ctx);
   const sourceApiKey = params.sourceFileApiKey || DEFAULT_SOURCE_FILE_API_KEY;
@@ -264,15 +255,25 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  async function importFromBlock() {
+  // Remember last processed file to avoid duplicate imports
+  const lastSigRef = useRef<string | null>(null);
+
+  function fileSignature(fileVal: any): string | null {
+    if (!fileVal) return null;
+    if (fileVal.upload_id) return `upload:${fileVal.upload_id}`;
+    if (fileVal.__direct_url) return `url:${fileVal.__direct_url}`;
+    return null;
+  }
+
+  async function importFromBlock(explicitFileVal?: any) {
     try {
       setBusy(true);
       setNotice(null);
 
-      const fileVal = getSiblingFileFromBlock(ctx, sourceApiKey);
+      const fileVal = explicitFileVal ?? getSiblingFileFromBlock(ctx, sourceApiKey);
       log('resolved sibling file →', fileVal);
       if (!fileVal) {
-        setNotice(`No file found in this block’s "${sourceApiKey}" field. Upload an .xlsx/.xls/.csv there and try again.`);
+        setNotice(`No file found in this block’s "${sourceApiKey}" field. Upload an .xlsx/.xls/.csv there.`);
         return;
       }
 
@@ -324,10 +325,6 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
         await setSiblingInBlock(ctx, params.rowCountApiKey, Number(norm.rows.length));
       }
 
-      // if (typeof (ctx as any).saveCurrentItem === 'function') {
-      //   await (ctx as any).saveCurrentItem();
-      // }
-
       ctx.notice(`Imported ${norm.rows.length} rows × ${norm.columns.length} columns.`);
     } catch (e: any) {
       setNotice(`Import failed: ${e?.message || e}`);
@@ -363,17 +360,36 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     await ctx.setFieldValue(path, value);
   }
 
-  useEffect(() => {}, [ctx.fieldPath, ctx.formValues]);
+  // Auto-run import whenever the sibling upload changes
+  useEffect(() => {
+    const fileVal = getSiblingFileFromBlock(ctx, sourceApiKey);
+    const sig = fileSignature(fileVal);
+
+    if (!sig) return;
+
+    if (lastSigRef.current === sig) {
+      // same file; do nothing
+      return;
+    }
+    if (busy) {
+      // avoid overlapping runs
+      return;
+    }
+
+    lastSigRef.current = sig;
+    void importFromBlock(fileVal);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctx.formValues, ctx.fieldPath, ctx.locale]); // re-evaluate when the block changes / locale changes
 
   return (
     <Canvas ctx={ctx}>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <Button onClick={importFromBlock} disabled={busy} buttonType="primary">
-          Import from Excel/CSV (block)
-        </Button>
-      </div>
       {busy && <Spinner />}
       {notice && <Alert>{notice}</Alert>}
+      {!busy && !notice && (
+        <div style={{ opacity: 0.7, fontSize: 12, marginTop: 4 }}>
+          Upload or replace the file in this block’s <code>{sourceApiKey}</code> field—import runs automatically.
+        </div>
+      )}
     </Canvas>
   );
 }
@@ -391,12 +407,23 @@ function Config({ ctx }: { ctx: any }) {
         onChange={setToken}
       />
       <div style={{ marginTop: 8 }}>
-        <Button buttonType="primary" onClick={async () => {
-          await ctx.updatePluginParameters({ cmaToken: token });
-          ctx.notice('Saved plugin configuration.');
-        }}>
+        <button
+          className="sb"
+          onClick={async () => {
+            await ctx.updatePluginParameters({ cmaToken: token });
+            ctx.notice('Saved plugin configuration.');
+          }}
+          style={{
+            padding: '8px 12px',
+            borderRadius: 6,
+            border: '1px solid var(--border-color)',
+            background: 'var(--primary-color, #0b5fff)',
+            color: '#fff',
+            cursor: 'pointer'
+          }}
+        >
           Save configuration
-        </Button>
+        </button>
       </div>
     </Canvas>
   );
@@ -432,7 +459,7 @@ if (window.self === window.top) {
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <div style={{ padding: 16 }}>
       <h3>Plugin dev harness</h3>
-      <p>Attach this as the editor for the block’s <code>dataJson</code> field. The importer reads from the sibling <code>sourcefile</code> field in the same block.</p>
+      <p>Attach this as the editor for the block’s <code>dataJson</code> field. The importer reads from the sibling <code>sourcefile</code> field in the same block and runs automatically when the file changes.</p>
     </div>,
   );
 }
