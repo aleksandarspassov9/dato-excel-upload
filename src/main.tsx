@@ -46,6 +46,7 @@ function toStringValue(v: unknown): string {
 
 async function writePayload(ctx: RenderFieldExtensionCtx, payloadObj: any) {
   const value = JSON.stringify(payloadObj);
+  // Reset then set to ensure change detection
   await ctx.setFieldValue(ctx.fieldPath, null);
   await Promise.resolve();
   await ctx.setFieldValue(ctx.fieldPath, value);
@@ -70,10 +71,8 @@ function resolveCurrentBlockContainer(ctx: RenderFieldExtensionCtx): { container
   if (!root) return null;
 
   const parts = splitPath(ctx.fieldPath);
-  // If the last segment is the locale, drop it
-  if (ctx.locale && parts[parts.length - 1] === ctx.locale) parts.pop();
-  // Drop the current field key => the remainder is the block container path
-  parts.pop();
+  if (ctx.locale && parts[parts.length - 1] === ctx.locale) parts.pop(); // drop locale tail
+  parts.pop(); // drop current field key
 
   const container = getAtPath(root, parts);
   if (!container || typeof container !== 'object') return null;
@@ -143,7 +142,6 @@ function getSiblingFileFromBlock(ctx: RenderFieldExtensionCtx, siblingApiKey: st
   }
 
   // 3) Safety net: scan this container’s keys and pick an upload-like value.
-  // Prefer a key whose apiKey maps to siblingApiKey; otherwise first upload-like.
   let fallback: any | null = null;
   for (const k of Object.keys(container)) {
     const defById = (ctx.fields as any)[k] || allDefs.find((f: any) => String(f.id) === String(k));
@@ -177,7 +175,6 @@ function aoaFromWorksheet(ws: XLSX.WorkSheet): any[][] {
 function slugHeader(raw: unknown, fallback: string) {
   let s = toStringValue(raw).trim();
   if (!s) return fallback;
-  // keep letters, numbers, spaces, underscores, dashes; collapse whitespace to single _
   s = s.replace(/[^\p{L}\p{N}\s_-]+/gu, '').trim().replace(/\s+/g, '_');
   s = s.replace(/^_+/, '');
   if (/^\d/.test(s) || !s) return fallback;
@@ -238,6 +235,17 @@ async function fetchUploadMeta(
   return null;
 }
 
+/** =================== Global, per-block dedupe guard =================== */
+/** Keeps last processed signature per block, survives component re-mounts. */
+const LAST_SIG_BY_BLOCK = new Map<string, string>();
+function blockKeyFromCtx(ctx: RenderFieldExtensionCtx): string | null {
+  const hit = resolveCurrentBlockContainer(ctx);
+  if (!hit) return null;
+  const { containerPath } = hit;
+  // include locale to avoid cross-locale collisions if the upload is localized
+  return [...containerPath, ctx.locale || ''].join('|');
+}
+
 /** =================== UI =================== */
 function Alert({ children }: { children: React.ReactNode }) {
   return (
@@ -255,7 +263,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  // Remember last processed file to avoid duplicate imports
+  // local guard (nice-to-have), but global map is the real fix
   const lastSigRef = useRef<string | null>(null);
 
   function fileSignature(fileVal: any): string | null {
@@ -265,7 +273,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     return null;
   }
 
-  async function importFromBlock(explicitFileVal?: any) {
+  async function importFromBlock(explicitFileVal?: any, blockKey?: string) {
     try {
       setBusy(true);
       setNotice(null);
@@ -288,7 +296,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
       if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
 
       // Parse → normalize
-      const ct = res.headers.get('content-type') || meta.mime || '';
+      const ct = (res.headers.get('content-type') || meta.mime || '').toLowerCase();
       let aoa: any[][];
       if (ct.includes('csv')) {
         const text = await res.text();
@@ -327,6 +335,9 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
 
       ctx.notice(`Imported ${norm.rows.length} rows × ${norm.columns.length} columns.`);
     } catch (e: any) {
+      // Clear guard so user can retry after fixing error
+      const k = blockKeyFromCtx(ctx);
+      if (k) LAST_SIG_BY_BLOCK.delete(k);
       setNotice(`Import failed: ${e?.message || e}`);
     } finally {
       setBusy(false);
@@ -346,40 +357,38 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     if (!hit) return;
     const { containerPath } = hit;
 
-    // Find sibling field definition by apiKey
     const allDefs = Object.values(ctx.fields) as any[];
     const def = allDefs.find((f: any) => (f.apiKey ?? f.attributes?.api_key) === apiKey);
 
-    // Prefer id-based path; fall back to apiKey if we can't resolve the def
     const key = def?.id ? String(def.id) : apiKey;
 
-    // Respect localization if the target field is localized
     const isLocalized = Boolean(def?.localized ?? def?.attributes?.localized);
     const path = [...containerPath, key, ...(isLocalized && ctx.locale ? [ctx.locale] : [])].join('.');
 
     await ctx.setFieldValue(path, value);
   }
 
-  // Auto-run import whenever the sibling upload changes
+  // Auto-run import whenever the sibling upload changes, using a GLOBAL per-block dedupe
   useEffect(() => {
     const fileVal = getSiblingFileFromBlock(ctx, sourceApiKey);
     const sig = fileSignature(fileVal);
+    const blockKey = blockKeyFromCtx(ctx);
 
-    if (!sig) return;
+    if (!sig || !blockKey) return;
 
-    if (lastSigRef.current === sig) {
-      // same file; do nothing
-      return;
-    }
-    if (busy) {
-      // avoid overlapping runs
-      return;
-    }
+    // 1) If we already processed this sig for this block, bail.
+    if (LAST_SIG_BY_BLOCK.get(blockKey) === sig) return;
 
+    // 2) If a local run is already in-flight AND for the same sig, bail.
+    if (lastSigRef.current === sig || busy) return;
+
+    // 3) Record intent BEFORE importing to survive re-mounts triggered by setFieldValue.
+    LAST_SIG_BY_BLOCK.set(blockKey, sig);
     lastSigRef.current = sig;
-    void importFromBlock(fileVal);
+
+    void importFromBlock(fileVal, blockKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ctx.formValues, ctx.fieldPath, ctx.locale]); // re-evaluate when the block changes / locale changes
+  }, [ctx.formValues, ctx.fieldPath, ctx.locale]);
 
   return (
     <Canvas ctx={ctx}>
@@ -408,7 +417,6 @@ function Config({ ctx }: { ctx: any }) {
       />
       <div style={{ marginTop: 8 }}>
         <button
-          className="sb"
           onClick={async () => {
             await ctx.updatePluginParameters({ cmaToken: token });
             ctx.notice('Saved plugin configuration.');
@@ -459,7 +467,7 @@ if (window.self === window.top) {
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <div style={{ padding: 16 }}>
       <h3>Plugin dev harness</h3>
-      <p>Attach this as the editor for the block’s <code>dataJson</code> field. The importer reads from the sibling <code>sourcefile</code> field in the same block and runs automatically when the file changes.</p>
+      <p>Attach this as the editor for the block’s <code>dataJson</code> field. The importer reads from the sibling <code>sourcefile</code> field and runs automatically when the file changes.</p>
     </div>,
   );
 }
