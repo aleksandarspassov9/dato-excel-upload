@@ -173,16 +173,57 @@ function aoaFromWorksheet(ws: XLSX.WorkSheet): any[][] {
   const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as any[][];
   return aoa.filter(row => row.some(cell => String(cell ?? '').trim() !== ''));
 }
+
+/** =================== Header-aware normalization =================== */
+function slugHeader(raw: unknown, fallback: string) {
+  let s = toStringValue(raw).trim();
+  if (!s) return fallback;
+  // keep letters, numbers, spaces, underscores, dashes; collapse whitespace to single _
+  s = s.replace(/[^\p{L}\p{N}\s_-]+/gu, '').trim().replace(/\s+/g, '_');
+  // avoid leading digits and stray underscores
+  s = s.replace(/^_+/, '');
+  if (/^\d/.test(s) || !s) return fallback;
+  return s;
+}
+function makeUnique(names: string[]) {
+  const seen = new Map<string, number>();
+  return names.map((n) => {
+    const base = n;
+    const count = (seen.get(base) ?? 0) + 1;
+    seen.set(base, count);
+    return count === 1 ? base : `${base}_${count}`;
+  });
+}
+/**
+ * Uses the FIRST ROW as headers. Ensures unique, non-empty column names.
+ * If there are more cells than headers, adds fallback names.
+ */
 function normalizeAoA(aoa: any[][]) {
-  const maxCols = Math.max(1, ...aoa.map(r => r.length));
-  const columns = Array.from({ length: maxCols }, (_, i) => `column_${i + 1}`);
-  const rows: TableRow[] = aoa.map(r => {
+  if (!aoa.length) return { rows: [], columns: [] };
+
+  const header = aoa[0] ?? [];
+  const body = aoa.slice(1);
+
+  // Start with header-derived names (fallbacks for empties)
+  let columns = header.map((h, i) => slugHeader(h, `column_${i + 1}`));
+
+  // If any data rows are wider, extend columns with fallbacks
+  const maxCols = Math.max(columns.length, ...body.map((r) => r.length), 1);
+  while (columns.length < maxCols) {
+    columns.push(`column_${columns.length + 1}`);
+  }
+
+  // Ensure uniqueness (handles duplicates in header)
+  columns = makeUnique(columns);
+
+  const rows: TableRow[] = body.map((r) => {
     const padded = [...r];
     while (padded.length < maxCols) padded.push('');
     const obj: Record<string, string> = {};
     columns.forEach((c, i) => { obj[c] = toStringValue(padded[i]); });
     return obj;
   });
+
   return { rows, columns };
 }
 
