@@ -273,7 +273,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     return null;
   }
 
-  async function importFromBlock(explicitFileVal?: any, blockKey?: string) {
+  async function importFromBlock(explicitFileVal?: any) {
     try {
       setBusy(true);
       setNotice(null);
@@ -386,7 +386,7 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
     LAST_SIG_BY_BLOCK.set(blockKey, sig);
     lastSigRef.current = sig;
 
-    void importFromBlock(fileVal, blockKey);
+    void importFromBlock(fileVal);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctx.formValues, ctx.fieldPath, ctx.locale]);
 
