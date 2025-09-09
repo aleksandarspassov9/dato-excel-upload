@@ -324,9 +324,9 @@ function Uploader({ ctx }: { ctx: RenderFieldExtensionCtx }) {
         await setSiblingInBlock(ctx, params.rowCountApiKey, Number(norm.rows.length));
       }
 
-      if (typeof (ctx as any).saveCurrentItem === 'function') {
-        await (ctx as any).saveCurrentItem();
-      }
+      // if (typeof (ctx as any).saveCurrentItem === 'function') {
+      //   await (ctx as any).saveCurrentItem();
+      // }
 
       ctx.notice(`Imported ${norm.rows.length} rows × ${norm.columns.length} columns.`);
     } catch (e: any) {
